@@ -150,18 +150,37 @@ python read_dosimeter.py --send-data --latitude 45.0 --longitude 5.0 --api-key O
 
 ## Raspberry Pi Deployment (Fixed Station)
 
+### Prerequisites
+
+Ensure your Raspberry Pi has:
+- Internet connection (WiFi or Ethernet)
+- Python 3.7+ (pre-installed on Raspberry Pi OS)
+- Git (install if needed):
+
+```bash
+# Check if git is installed
+git --version
+
+# If not installed, install it:
+sudo apt update
+sudo apt install git -y
+```
+
 ### Quick Method
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/Ant1data/Xx_Custom_Rium_GM_xX.git
-cd Xx_Custom_Rium_GM_xX
+git clone https://github.com/Ant1data/OR_RiumGM_fixedbeacon.git
+cd OR_RiumGM_fixedbeacon
 
-# 2. Run launcher for initial setup
+# 2. Install Python dependencies
+pip3 install -r requirements.txt
+
+# 3. Run launcher for initial setup
 python3 launcher.py
 # Select option 1 to configure, then option 4 to test
 
-# 3. Once tested, set up auto-start
+# 4. Once tested, set up auto-start
 sudo cp rium-dosimeter.service /etc/systemd/system/
 sudo nano /etc/systemd/system/rium-dosimeter.service  # Edit paths if needed
 sudo systemctl daemon-reload
