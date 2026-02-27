@@ -115,15 +115,29 @@ def run_configuration_wizard():
     print("4️⃣  Station Tags (Optional)")
     print("-" * 70)
     print("Add descriptive tags to help identify and filter your station's data.")
-    print("Examples:")
-    print("  • station_name=HomeStation")
-    print("  • location=Paris")
-    print("  • device=RiumGM_001")
-    print("  • altitude=100m")
+    print("Note: All tags will automatically be prefixed with 'fixed_beacon_'")
+    print()
+    print("Examples (enter WITHOUT the prefix):")
+    print("  • station_name=HomeStation  → becomes: fixed_beacon_station_name=HomeStation")
+    print("  • location=Paris  → becomes: fixed_beacon_location=Paris")
+    print("  • device=RiumGM_001  → becomes: fixed_beacon_device=RiumGM_001")
+    print("  • altitude=100m  → becomes: fixed_beacon_altitude=100m")
     print()
     print("Enter tags (comma-separated, press Enter to skip):")
     
     tags = get_input("Tags")
+    
+    # Add fixed_beacon_ prefix if user provided tags
+    if tags:
+        tag_list = [t.strip() for t in tags.split(',') if t.strip()]
+        prefixed_tags = []
+        for tag in tag_list:
+            if not tag.startswith('fixed_beacon_'):
+                tag = f'fixed_beacon_{tag}'
+            prefixed_tags.append(tag)
+        tags = ', '.join(prefixed_tags)
+        print(f"\n  → Tags with prefix: {tags}")
+    
     print()
     
     # Summary

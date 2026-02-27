@@ -3,7 +3,7 @@
 Simple serial reader for a Rium GM dosimeter (generic USB serial logger).
 
 Contributors:
-E. Martinet-Gerphagnon, PhD Student, ASNR x Institut Marie Curie
+E. Martinet-Gerphagnon, PhD Student, ASNR x Institut Curie
 A. Dreux, Data engineer in dosimetry, ASNR
 
 Features:
@@ -30,9 +30,12 @@ import sys
 import time
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 
 SAVE_RATE = 60  # [s] - Period for aggregating and sending measurements
+MAX_QUEUE_SIZE = 100  # Maximum number of failed measurements to keep in queue
+MAX_QUEUE_AGE_DAYS = 7  # Maximum age of queued measurements in days
 
 # Check and install dependencies automatically
 def check_dependencies():
@@ -233,6 +236,119 @@ def hexdump(b: bytes) -> str:
     return ' '.join(f'{x:02x}' for x in b)
 
 
+def get_queue_file():
+    """Get the path to the queue file."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, 'pending_measurements.json')
+
+
+def load_queue():
+    """Load pending measurements from queue file."""
+    queue_file = get_queue_file()
+    if not os.path.exists(queue_file):
+        return []
+    
+    try:
+        with open(queue_file, 'r') as f:
+            queue = json.load(f)
+        
+        # Filter out measurements older than MAX_QUEUE_AGE_DAYS
+        now = time.time()
+        max_age_seconds = MAX_QUEUE_AGE_DAYS * 24 * 60 * 60
+        
+        filtered_queue = []
+        for item in queue:
+            queued_time = item.get('queued_at', 0)
+            if now - queued_time < max_age_seconds:
+                filtered_queue.append(item)
+        
+        # Keep only the most recent MAX_QUEUE_SIZE items
+        if len(filtered_queue) > MAX_QUEUE_SIZE:
+            filtered_queue = filtered_queue[-MAX_QUEUE_SIZE:]
+        
+        # Save filtered queue back if we removed items
+        if len(filtered_queue) < len(queue):
+            save_queue(filtered_queue)
+        
+        return filtered_queue
+    except Exception as e:
+        print(f"Warning: Could not load queue file: {e}")
+        return []
+
+
+def save_queue(queue):
+    """Save pending measurements to queue file."""
+    queue_file = get_queue_file()
+    try:
+        with open(queue_file, 'w') as f:
+            json.dump(queue, f, indent=2)
+    except Exception as e:
+        print(f"Warning: Could not save queue file: {e}")
+
+
+def add_to_queue(api_key, data, production=False):
+    """Add a failed measurement to the queue."""
+    queue = load_queue()
+    
+    queue_item = {
+        'api_key': api_key,
+        'data': data,
+        'production': production,
+        'queued_at': time.time()
+    }
+    
+    queue.append(queue_item)
+    
+    # Keep only the most recent MAX_QUEUE_SIZE items
+    if len(queue) > MAX_QUEUE_SIZE:
+        queue = queue[-MAX_QUEUE_SIZE:]
+    
+    save_queue(queue)
+    print(f"  → Added to queue ({len(queue)} pending measurements)")
+
+
+def process_queue():
+    """Try to send all queued measurements."""
+    queue = load_queue()
+    if not queue:
+        return
+    
+    print(f"\n→ Processing queue: {len(queue)} pending measurements...")
+    
+    successful = []
+    failed = []
+    
+    for idx, item in enumerate(queue):
+        print(f"  Attempt {idx + 1}/{len(queue)}...", end=' ')
+        
+        # Try to send without retries (we're already in retry mode)
+        if post_measurement(
+            item['api_key'],
+            item['data'],
+            item['production'],
+            max_retries=1  # Single attempt for queued items
+        ):
+            successful.append(item)
+            print("✓")
+        else:
+            failed.append(item)
+            print("✗")
+            # Don't spam if multiple failures
+            if len(failed) >= 3:
+                print(f"  (Stopping after 3 consecutive failures)")
+                # Keep the rest in queue
+                failed.extend(queue[idx + 1:])
+                break
+    
+    # Update queue with only the failed ones
+    save_queue(failed)
+    
+    if successful:
+        print(f"✓ Successfully sent {len(successful)} queued measurements")
+    if failed:
+        print(f"  ({len(failed)} measurements still in queue)")
+
+
 def parse_rium_frame(frame: bytes) -> dict:
     """
     Parse a single Rium frame (12 bytes).
@@ -266,8 +382,11 @@ def parse_rium_frame(frame: bytes) -> dict:
     }
 
 
-def post_measurement(api_key, data, production=False):
-    """Post measurement data to OpenRadiation API."""
+def post_measurement(api_key, data, production=False, max_retries=3):
+    """
+    Post measurement data to OpenRadiation API with retry logic.
+    Returns True if successful, False otherwise.
+    """
     url = "https://submit.openradiation.net/measurements"
     payload = {
         "apiKey": api_key,
@@ -287,24 +406,60 @@ def post_measurement(api_key, data, production=False):
     print(json.dumps(payload, indent=2))
     print(f"API endpoint: {url}")
     
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
-        if response.status_code == 201:
-            print("✓ Measurement posted successfully.")
-            return True
-        else:
-            print(f"✗ Failed to post measurement: {response.status_code}")
-            print(f"  Response: {response.text}")
-            return False
-    except requests.exceptions.Timeout:
-        print("✗ Error: Request timeout after 30s")
-        return False
-    except requests.exceptions.ConnectionError as e:
-        print(f"✗ Error: Connection failed - {e}")
-        return False
-    except Exception as e:
-        print(f"✗ Error posting measurement: {e}")
-        return False
+    # Retry loop with exponential backoff
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            if response.status_code == 201:
+                print("✓ Measurement posted successfully.")
+                return True
+            else:
+                print(f"✗ Failed to post measurement: {response.status_code}")
+                print(f"  Response: {response.text}")
+                
+                # If it's a client error (4xx), don't retry
+                if 400 <= response.status_code < 500:
+                    print("  → Client error, not retrying.")
+                    return False
+                    
+                # Server error (5xx), retry
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    print(f"  → Retrying in {wait_time}s... (attempt {attempt + 2}/{max_retries})")
+                    time.sleep(wait_time)
+                    
+        except requests.exceptions.Timeout:
+            print(f"✗ Error: Request timeout after 30s (attempt {attempt + 1}/{max_retries})")
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                print(f"  → Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                
+        except requests.exceptions.ConnectionError as e:
+            print(f"✗ Error: No internet connection (attempt {attempt + 1}/{max_retries})")
+            if attempt < max_retries - 1:
+                wait_time = 5 * (attempt + 1)  # 5s, 10s, 15s
+                print(f"  → Will retry in {wait_time}s...")
+                print(f"  → (Measurements continue to be logged locally)")
+                time.sleep(wait_time)
+                
+        except Exception as e:
+            print(f"✗ Error posting measurement: {e} (attempt {attempt + 1}/{max_retries})")
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                print(f"  → Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+    
+    # All retries failed
+    print("✗ Failed to post measurement after all retries.")
+    print("  → Data has been saved locally in CSV file.")
+    
+    # Add to queue for later retry (only if max_retries > 1, to avoid queuing during queue processing)
+    if max_retries > 1:
+        add_to_queue(api_key, data, production)
+        print("  → Will retry automatically when connection is restored.")
+    
+    return False
 
 
 
@@ -352,15 +507,54 @@ def main():
 
     # Merge config file values with command line arguments (CLI takes precedence)
     api_key = args.api_key if args.api_key else (config.get('api_key') if config else None)
-    latitude = args.latitude if args.latitude is not None else (float(config.get('latitude')) if config and config.get('latitude') else None)
-    longitude = args.longitude if args.longitude is not None else (float(config.get('longitude')) if config and config.get('longitude') else None)
+    
+    # Validate and convert latitude/longitude to float
+    latitude = None
+    longitude = None
+    
+    if args.latitude is not None:
+        latitude = float(args.latitude)
+    elif config and config.get('latitude'):
+        try:
+            latitude = float(config.get('latitude'))
+        except (ValueError, TypeError):
+            print(f"Error: Invalid latitude value in config: '{config.get('latitude')}' (must be a number)")
+            latitude = None
+    
+    if args.longitude is not None:
+        longitude = float(args.longitude)
+    elif config and config.get('longitude'):
+        try:
+            longitude = float(config.get('longitude'))
+        except (ValueError, TypeError):
+            print(f"Error: Invalid longitude value in config: '{config.get('longitude')}' (must be a number)")
+            longitude = None
+    
+    # Validate API key is a non-empty string
+    if api_key and not isinstance(api_key, str):
+        api_key = str(api_key)
+    if api_key:
+        api_key = api_key.strip()
+        if not api_key:
+            api_key = None
+    
     user_id = args.user_id if args.user_id else (config.get('user_id') if config else None)
     
     # Parse tags from config file (comma-separated) and merge with CLI tags
+    # Force "fixed_beacon_" prefix on all tags
     config_tags = []
     if config and config.get('tags'):
         config_tags = [tag.strip() for tag in config.get('tags').split(',') if tag.strip()]
-    all_tags = config_tags + args.tag
+    
+    # Combine and ensure fixed_beacon_ prefix
+    all_tags = []
+    for tag in (config_tags + args.tag):
+        tag = tag.strip()
+        if tag:
+            # Add fixed_beacon_ prefix if not already present
+            if not tag.startswith('fixed_beacon_'):
+                tag = f'fixed_beacon_{tag}'
+            all_tags.append(tag)
 
     # Display configuration status
     print("="*60)
@@ -373,6 +567,13 @@ def main():
         print(f"  User ID: {user_id if user_id else 'NOT SET'}")
         print(f"  Tags: {', '.join(all_tags) if all_tags else 'NONE'}")
     print(f"Data submission: {'ENABLED (production)' if args.send_data and args.production else 'ENABLED (test mode)' if args.send_data else 'DISABLED'}")
+    
+    # Show queue status
+    if args.send_data:
+        queue = load_queue()
+        if queue:
+            print(f"Queued measurements: {len(queue)} pending (will retry when connection is restored)")
+    
     print("="*60 + "\n")
 
     # Validate send-data requirements
@@ -641,7 +842,15 @@ def main():
                             if all_tags:
                                 data["tags"] = all_tags
                             
-                            post_measurement(api_key, data, args.production)
+                            # Try to send current measurement
+                            success = post_measurement(api_key, data, args.production)
+                            
+                            # If successful and there are queued measurements, process them
+                            if success:
+                                queue = load_queue()
+                                if queue:
+                                    print(f"\n→ Connection restored! Processing {len(queue)} queued measurements...")
+                                    process_queue()
                     else:
                         print("  No hits detected in this period.")
                     

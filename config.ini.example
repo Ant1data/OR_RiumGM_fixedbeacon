@@ -2,12 +2,13 @@
 # OpenRadiation API Configuration
 # Get your API key from: https://www.openradiation.org/
 
-# Your OpenRadiation API key (REQUIRED for data submission)
+# Your OpenRadiation API key (REQUIRED for data submission) - must be a string
 api_key = YOUR_API_KEY_HERE
 
-# Fixed station location coordinates (decimal degrees) - REQUIRED
+# Fixed station location coordinates (decimal degrees) - REQUIRED - must be numbers
 # Example: latitude = 48.8566, longitude = 2.3522 (Paris)
 # Find your coordinates: https://www.google.com/maps (right-click on location)
+# IMPORTANT: Use decimal degrees format (e.g., 48.8566, not 48°51'24"N)
 latitude = 48.8566
 longitude = 2.3522
 
@@ -17,7 +18,9 @@ user_id =
 
 # Optional: Tags for measurements (comma-separated)
 # Used to identify and filter your station's data
-# Example: tags = station_name=MyStation, location=Paris, device=RiumGM_001, altitude=100m
+# NOTE: All tags are automatically prefixed with "fixed_beacon_"
+# Example: tags = station_name=MyStation, location=Paris, device=RiumGM_001
+# Result:  fixed_beacon_station_name=MyStation, fixed_beacon_location=Paris, fixed_beacon_device=RiumGM_001
 tags = station_name=FixedStation, device=RiumGM
 
 # ==============================================================================

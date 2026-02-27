@@ -43,8 +43,10 @@ This Python script reads data from a Rium GM dosimeter via USB serial and automa
 - ✅ Real-time reading of impacts detected by the Geiger-Müller tube
 - ✅ Automatic dose rate calculation (µSv/h)
 - ✅ Local CSV logging with timestamps
+- ✅ **Automatic queue system for failed uploads** (new!)
 - ✅ Automatic submission to OpenRadiation (optional)
 - ✅ Persistent configuration via `config.ini` file
+- ✅ Network resilience with automatic retry
 - ✅ Compatible with Raspberry Pi / Arduino / Linux / Windows
 
 ## Installation
@@ -282,6 +284,31 @@ The script will automatically create a `config.ini` template if missing.
 ### No data received
 
 Verify that the dosimeter is powered on and configured to send via USB serial.
+
+### Queued measurements
+
+If you see "X pending measurements" at startup, it means previous uploads failed (e.g., due to network issues). The system will automatically retry when the connection is restored. See [QUEUE_SYSTEM.md](QUEUE_SYSTEM.md) for details.
+
+## Advanced Features
+
+### Automatic Queue System
+
+Failed measurements are automatically queued and retried when connection is restored:
+- **Maximum queue size**: 100 measurements
+- **Auto-cleanup**: Measurements older than 7 days are removed
+- **Zero manual intervention**: Fully automatic
+
+See [QUEUE_SYSTEM.md](QUEUE_SYSTEM.md) for complete documentation.
+
+### Network Resilience
+
+The system handles network failures gracefully:
+- **3 automatic retries** with exponential backoff
+- **Local CSV backup** always preserved
+- **Queue system** for extended outages
+- **Continues monitoring** even without internet
+
+See [ROBUSTNESS.md](ROBUSTNESS.md) for reliability details.
 
 ## Contributors
 
