@@ -1,0 +1,41 @@
+[DEFAULT]
+# OpenRadiation API Configuration
+# Get your API key from: https://www.openradiation.org/
+
+# Your OpenRadiation API key (REQUIRED for data submission)
+api_key = YOUR_API_KEY_HERE
+
+# Fixed station location coordinates (decimal degrees) - REQUIRED
+# Example: latitude = 48.8566, longitude = 2.3522 (Paris)
+# Find your coordinates: https://www.google.com/maps (right-click on location)
+latitude = 48.8566
+longitude = 2.3522
+
+# Optional: User ID to associate measurements with your account
+# This can be obtained from your OpenRadiation profile
+user_id = 
+
+# Optional: Tags for measurements (comma-separated)
+# Used to identify and filter your station's data
+# Example: tags = station_name=MyStation, location=Paris, device=RiumGM_001, altitude=100m
+tags = station_name=FixedStation, device=RiumGM
+
+# ==============================================================================
+# INSTRUCTIONS FOR RASPBERRY PI / FIXED STATION DEPLOYMENT:
+# ==============================================================================
+# 
+# 1. Copy this file to 'config.ini':
+#    cp config.ini.example config.ini
+#
+# 2. Edit config.ini with your actual values:
+#    nano config.ini
+#
+# 3. Run in test mode first (data marked as "test"):
+#    python3 read_dosimeter.py --send-data
+#
+# 4. When ready, run in production mode (real data):
+#    python3 read_dosimeter.py --send-data --production
+#
+# 5. For automatic startup on Raspberry Pi, see readme.md
+#
+# ==============================================================================
