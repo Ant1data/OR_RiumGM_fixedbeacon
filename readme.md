@@ -22,8 +22,9 @@
 ### Step 3: Follow the menu
 The launcher will guide you through:
 1. Configuration (first time only)
-2. Connection test
-3. Start monitoring
+2. Test monitoring (local, no upload)
+3. **Setup automatic start** (survives power cuts!) 
+4. Start production monitoring
 
 **That's it!** The system automatically:
 - Installs dependencies (if needed)
@@ -31,6 +32,7 @@ The launcher will guide you through:
 - Records radiation events
 - Saves data locally (CSV)
 - Uploads to OpenRadiation (optional)
+- **Restarts after power cuts** (with systemd service)
 
 ---
 
@@ -43,26 +45,81 @@ This Python script reads data from a Rium GM dosimeter via USB serial and automa
 - ✅ Real-time reading of impacts detected by the Geiger-Müller tube
 - ✅ Automatic dose rate calculation (µSv/h)
 - ✅ Local CSV logging with timestamps
-- ✅ **Automatic queue system for failed uploads** (new!)
+- ✅ **Automatic queue system for failed uploads**
 - ✅ Automatic submission to OpenRadiation (optional)
 - ✅ Persistent configuration via `config.ini` file
 - ✅ Network resilience with automatic retry
-- ✅ Compatible with Raspberry Pi / Arduino / Linux / Windows
+- ✅ **Systemd service for auto-start after power cuts** (Raspberry Pi/Linux)
+- ✅ Interactive launcher with guided setup
+- ✅ Compatible with Raspberry Pi / Linux / Windows
 
 ## Installation
 
+### Quick Installation (Raspberry Pi / Linux)
+
+**Method 1: Automated (Recommended)**
+
+```bash
+# 1. Clone repository
+git clone https://github.com/Ant1data/OR_RiumGM_fixedbeacon.git
+cd OR_RiumGM_fixedbeacon
+
+# 2. Run installation script
+chmod +x install_dependencies.sh
+./install_dependencies.sh
+
+# 3. Launch the application
+python3 launcher.py
+```
+
+The `install_dependencies.sh` script will:
+- ✅ Check Python installation
+- ✅ Install required packages (pyserial, requests)
+- ✅ Configure serial port permissions (dialout group)
+- ✅ Guide you through setup
+
+**Method 2: Manual**
+
+```bash
+# Install dependencies
+pip3 install -r requirements.txt
+
+# Add user to dialout group (for serial port access)
+sudo usermod -a -G dialout $USER
+# Then LOG OUT and LOG BACK IN
+
+# Launch
+python3 launcher.py
+```
+
+### Windows Installation
+
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Launch
+python launcher.py
+# Or double-click START_WINDOWS.bat
+```
+
 ### Prerequisites
 
-```bash
-pip install pyserial requests
-```
+- **Python 3.7+** (pre-installed on Raspberry Pi OS)
+- **Git** (to clone repository):
+  ```bash
+  # Check if installed
+  git --version
+  
+  # Install if needed (Linux/Raspberry Pi)
+  sudo apt update
+  sudo apt install git -y
+  ```
 
-Or use the requirements file:
-```bash
-pip install -r requirements.txt
-```
-
-**Note**: The script will offer to auto-install dependencies if missing.
+**Note**: The launcher (`launcher.py`) will:
+- Automatically check for missing dependencies
+- Offer to install them if needed
+- Configure serial port permissions on Linux
 
 ### Configuration
 
@@ -150,42 +207,65 @@ python read_dosimeter.py --send-data --latitude 45.0 --longitude 5.0 --api-key O
 
 ## Raspberry Pi Deployment (Fixed Station)
 
-### Prerequisites
+### Complete Installation from Scratch
 
-Ensure your Raspberry Pi has:
-- Internet connection (WiFi or Ethernet)
-- Python 3.7+ (pre-installed on Raspberry Pi OS)
-- Git (install if needed):
+**What you need:**
+- ✅ Raspberry Pi (any model with USB port)
+- ✅ Internet connection (WiFi or Ethernet)
+- ✅ Screen + keyboard (or SSH access)
+- ✅ Rium GM dosimeter connected via USB
+
+**Step-by-step:**
 
 ```bash
-# Check if git is installed
-git --version
-
-# If not installed, install it:
+# 1. Update system (optional but recommended)
 sudo apt update
-sudo apt install git -y
+sudo apt upgrade -y
+
+# 2. Install Git (if not already installed)
+git --version  # Check if installed
+sudo apt install git -y  # Install if needed
+
+# 3. Clone the repository
+git clone https://github.com/Ant1data/OR_RiumGM_fixedbeacon.git
+cd OR_RiumGM_fixedbeacon
+
+# 4. Run automated installation
+chmod +x install_dependencies.sh
+./install_dependencies.sh
+
+# 5. If prompted about dialout group, LOG OUT and LOG BACK IN
+# Then return to the directory:
+cd ~/OR_RiumGM_fixedbeacon
+
+# 6. Launch the application
+python3 launcher.py
+# Follow the menu:
+#   - Option 1: Configure station
+#   - Option 2: Test connection
+#   - Option 3 or 4: Start monitoring
+
+# 7. Once tested, set up auto-start (optional)
+sudo cp rium-dosimeter.service /etc/systemd/system/
+sudo nano /etc/systemd/system/rium-dosimeter.service  # Verify paths
+sudo systemctl daemon-reload
+sudo systemctl enable rium-dosimeter.service
+sudo systemctl start rium-dosimeter.service
 ```
 
-### Quick Method
+### Quick Method (if dependencies already installed)
 
 ```bash
 # 1. Clone repository
 git clone https://github.com/Ant1data/OR_RiumGM_fixedbeacon.git
 cd OR_RiumGM_fixedbeacon
 
-# 2. Install Python dependencies
-pip3 install -r requirements.txt
+# 2. Install dependencies
+./install_dependencies.sh
+# Or manually: pip3 install -r requirements.txt
 
-# 3. Run launcher for initial setup
+# 3. Launch
 python3 launcher.py
-# Select option 1 to configure, then option 4 to test
-
-# 4. Once tested, set up auto-start
-sudo cp rium-dosimeter.service /etc/systemd/system/
-sudo nano /etc/systemd/system/rium-dosimeter.service  # Edit paths if needed
-sudo systemctl daemon-reload
-sudo systemctl enable rium-dosimeter.service
-sudo systemctl start rium-dosimeter.service
 ```
 
 ### System Service Details
@@ -285,26 +365,111 @@ python read_dosimeter.py --cps-to-usvh 0.4  # Example custom factor
 
 ## Troubleshooting
 
-### Serial port not detected
+### Dependencies Issues
 
+**Problem**: Missing Python packages (pyserial, requests)
+
+**Solutions**:
 ```bash
-# List available ports
-python read_dosimeter.py --list
+# Option 1: Use automated installer (Linux/Raspberry Pi)
+./install_dependencies.sh
 
-# On Linux, check permissions
-sudo usermod -a -G dialout $USER
-# Then log out/log in
+# Option 2: Use launcher (any platform)
+python3 launcher.py  # Will detect and offer to install
+
+# Option 3: Manual installation
+pip3 install -r requirements.txt  # Linux/Mac
+pip install -r requirements.txt   # Windows
 ```
 
-### Configuration error
+### Serial Port Access Issues (Linux/Raspberry Pi)
+
+**Problem**: `Permission denied` when accessing serial port
+
+**Cause**: User not in `dialout` group
+
+**Solution**:
+```bash
+# Check current groups
+groups
+
+# Add user to dialout group
+sudo usermod -a -G dialout $USER
+
+# IMPORTANT: Log out and log back in for changes to take effect
+# You can verify with:
+groups  # Should now show 'dialout'
+```
+
+**Alternative**: Use the automated installer which handles this:
+```bash
+./install_dependencies.sh
+```
+
+### Serial Port Not Detected
+
+**List available ports:**
+```bash
+python3 read_dosimeter.py --list  # Linux/Mac
+python read_dosimeter.py --list   # Windows
+```
+
+**On Linux**, dosimeter typically appears as:
+- `/dev/ttyUSB0` (USB serial adapter)
+- `/dev/ttyACM0` (USB CDC device)
+
+**Check if device is connected:**
+```bash
+# See all USB devices
+lsusb
+
+# Monitor connection/disconnection
+dmesg | grep tty
+```
+
+### Configuration Error
 
 The script will automatically create a `config.ini` template if missing.
 
-### No data received
+To reconfigure:
+```bash
+python3 launcher.py  # Choose option 1
+```
 
-Verify that the dosimeter is powered on and configured to send via USB serial.
+### No Data Received
 
-### Queued measurements
+**Checks:**
+1. ✅ Dosimeter is powered on
+2. ✅ USB cable is connected
+3. ✅ Correct serial port selected
+4. ✅ User has permissions (dialout group on Linux)
+
+**Test connection:**
+```bash
+python3 launcher.py  # Choose option 2
+```
+
+### Git Not Found (Raspberry Pi)
+
+**Problem**: `git: command not found`
+
+**Solution**:
+```bash
+sudo apt update
+sudo apt install git -y
+```
+
+### Python Not Found
+
+**Problem**: `python3: command not found`
+
+**Solution** (Raspberry Pi/Linux):
+```bash
+sudo apt update
+sudo apt install python3 python3-pip -y
+```
+
+### Queued Measurements
 
 If you see "X pending measurements" at startup, it means previous uploads failed (e.g., due to network issues). The system will automatically retry when the connection is restored. See [QUEUE_SYSTEM.md](QUEUE_SYSTEM.md) for details.
 
