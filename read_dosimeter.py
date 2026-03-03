@@ -26,6 +26,7 @@ import glob
 import json
 import os
 import re
+import signal
 import sys
 import time
 import uuid
@@ -36,6 +37,68 @@ from pathlib import Path
 SAVE_RATE = 60  # [s] - Period for aggregating and sending measurements
 MAX_QUEUE_SIZE = 100  # Maximum number of failed measurements to keep in queue
 MAX_QUEUE_AGE_DAYS = 7  # Maximum age of queued measurements in days
+
+# Global flag for graceful shutdown
+shutdown_requested = False
+
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    global shutdown_requested
+    print(f"\n{'='*60}")
+    print(f"  Shutdown signal received (signal {signum})")
+    print(f"{'='*60}")
+    shutdown_requested = True
+
+
+def get_pid_file():
+    """Get the path to the PID file."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, 'dosimeter.pid')
+
+
+def create_pid_file():
+    """Create a PID file to prevent multiple instances."""
+    pid_file = get_pid_file()
+    
+    # Check if already running
+    if os.path.exists(pid_file):
+        try:
+            with open(pid_file, 'r') as f:
+                old_pid = int(f.read().strip())
+            
+            # Check if process is actually running
+            try:
+                os.kill(old_pid, 0)  # Signal 0 just checks if process exists
+                print(f"⚠️  Another instance is already running (PID: {old_pid})")
+                print(f"   To stop it, run: kill {old_pid}")
+                return False
+            except OSError:
+                # Process doesn't exist, remove stale PID file
+                print(f"→ Removing stale PID file (PID {old_pid} not running)")
+                os.remove(pid_file)
+        except (ValueError, IOError):
+            # Corrupted PID file, remove it
+            os.remove(pid_file)
+    
+    # Create new PID file
+    try:
+        with open(pid_file, 'w') as f:
+            f.write(str(os.getpid()))
+        return True
+    except IOError as e:
+        print(f"⚠️  Warning: Could not create PID file: {e}")
+        return True  # Continue anyway
+
+
+def remove_pid_file():
+    """Remove the PID file on clean exit."""
+    pid_file = get_pid_file()
+    try:
+        if os.path.exists(pid_file):
+            os.remove(pid_file)
+    except IOError:
+        pass
 
 # Check and install dependencies automatically
 def check_dependencies():
@@ -464,6 +527,8 @@ def post_measurement(api_key, data, production=False, max_retries=3):
 
 
 def main():
+    global shutdown_requested
+    
     parser = argparse.ArgumentParser(
         description='Read Rium GM dosimeter via USB serial and log data.',
         epilog='Configuration: API credentials and location are read from config.ini file.'
@@ -491,6 +556,14 @@ def main():
     parser.add_argument('--tag', action='append', default=[], help='Add tags to measurements (can be used multiple times, e.g. --tag location=Paris --tag device=GM1)')
     
     args = parser.parse_args()
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler)  # systemctl stop
+    
+    # Create PID file to prevent multiple instances
+    if not create_pid_file():
+        sys.exit(1)
 
     # Welcome banner
     print("\n" + "="*60)
@@ -723,12 +796,14 @@ def main():
         period_events = []  # detailed events in current period
         time_last_save = time.time()  # Initialize to now
         
-        while True:
+        while not shutdown_requested:
             try:
                 # Blocking read for one byte — minimal latency to detect C1 events
+                # Use timeout to allow checking shutdown_requested periodically
+                ser.timeout = 0.1  # 100ms timeout
                 b = ser.read(1)
                 if not b:
-                    # shouldn't happen with blocking read, but guard anyway
+                    # No data available, check shutdown flag and continue
                     continue
 
                 ts = time.time()
@@ -867,17 +942,72 @@ def main():
                 break
             except KeyboardInterrupt:
                 print('\nInterrupted by user')
+                shutdown_requested = True
                 break
             except Exception as e:
                 print('Read loop error:', e)
                 # continue reading; don't sleep long to preserve responsiveness
                 continue
+        
+        # Graceful shutdown
+        if shutdown_requested:
+            print(f"\n{'='*60}")
+            print("  SHUTTING DOWN GRACEFULLY")
+            print(f"{'='*60}")
+            
+            # Save final period if there's data
+            if period_hit_times:
+                print("\n→ Saving final measurement period...")
+                hits_number = len(period_hit_times)
+                start_time = period_hit_times[0]
+                end_time = period_hit_times[-1]
+                duration = end_time - start_time if end_time > start_time else 1
+                cps = hits_number / duration
+                value = cps * args.cps_to_usvh
+                
+                print(f"  Final period: {hits_number} hits, {value:.4f} µSv/h")
+                
+                # Send if enabled
+                if args.send_data:
+                    report_uuid = str(uuid.uuid4())
+                    data = {
+                        "reportUuid": report_uuid,
+                        "latitude": float(latitude),
+                        "longitude": float(longitude),
+                        "value": float(round(value, 4)),
+                        "startTime": datetime.utcfromtimestamp(start_time).isoformat(),
+                        "hitsNumber": hits_number,
+                        "hitsPeriod": int(duration)
+                    }
+                    if user_id:
+                        data["userId"] = user_id
+                    if all_tags:
+                        data["tags"] = all_tags
+                    
+                    post_measurement(api_key, data, args.production)
+            
+            print("\n→ Closing serial port...")
+            
     finally:
         try:
             ser.close()
+            print("  ✓ Serial port closed")
         except Exception:
             pass
-        csvfile.close()
+        
+        try:
+            csvfile.close()
+            print("  ✓ CSV file closed")
+        except Exception:
+            pass
+        
+        # Remove PID file
+        remove_pid_file()
+        print("  ✓ PID file removed")
+        
+        print("\n" + "="*60)
+        print("  SHUTDOWN COMPLETE")
+        print("="*60 + "\n")
 
 
 if __name__ == '__main__':

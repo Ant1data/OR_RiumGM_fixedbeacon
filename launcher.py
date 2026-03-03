@@ -12,11 +12,116 @@ import sys
 import subprocess
 import platform
 import importlib.util
+import signal
+import time
 
 
 def is_linux():
     """Check if running on Linux/Raspberry Pi."""
     return platform.system() == 'Linux'
+
+
+def get_pid_file():
+    """Get the path to the PID file."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, 'dosimeter.pid')
+
+
+def is_running():
+    """Check if the dosimeter is currently running."""
+    pid_file = get_pid_file()
+    
+    if not os.path.exists(pid_file):
+        return False, None
+    
+    try:
+        with open(pid_file, 'r') as f:
+            pid = int(f.read().strip())
+        
+        # Check if process is actually running
+        try:
+            if is_linux():
+                os.kill(pid, 0)  # Signal 0 just checks if process exists
+            else:
+                # Windows: use tasklist
+                result = subprocess.run(
+                    ['tasklist', '/FI', f'PID eq {pid}'],
+                    capture_output=True,
+                    text=True
+                )
+                if str(pid) not in result.stdout:
+                    # Stale PID file
+                    os.remove(pid_file)
+                    return False, None
+            
+            return True, pid
+            
+        except (OSError, ProcessLookupError):
+            # Process doesn't exist, remove stale PID file
+            os.remove(pid_file)
+            return False, None
+            
+    except (ValueError, IOError):
+        # Corrupted PID file
+        try:
+            os.remove(pid_file)
+        except:
+            pass
+        return False, None
+
+
+def stop_dosimeter():
+    """Stop the running dosimeter instance."""
+    running, pid = is_running()
+    
+    if not running:
+        print("\n⚠️  No dosimeter instance is currently running.")
+        return False
+    
+    print(f"\n→ Found running instance (PID: {pid})")
+    print("→ Sending shutdown signal...")
+    
+    try:
+        if is_linux():
+            # Send SIGTERM for graceful shutdown
+            os.kill(pid, signal.SIGTERM)
+        else:
+            # Windows: send Ctrl+C event
+            subprocess.run(['taskkill', '/PID', str(pid), '/T'], check=False)
+        
+        # Wait for process to stop
+        print("→ Waiting for graceful shutdown...", end='', flush=True)
+        for i in range(10):  # Wait up to 10 seconds
+            time.sleep(1)
+            print('.', end='', flush=True)
+            
+            running, _ = is_running()
+            if not running:
+                print(" ✓")
+                print("\n✅ Dosimeter stopped successfully!")
+                return True
+        
+        print(" ⏱️")
+        print("\n⚠️  Process did not stop gracefully. Force stopping...")
+        
+        # Force kill if still running
+        if is_linux():
+            os.kill(pid, signal.SIGKILL)
+        else:
+            subprocess.run(['taskkill', '/F', '/PID', str(pid)], check=False)
+        
+        time.sleep(1)
+        running, _ = is_running()
+        if not running:
+            print("✅ Process force stopped.")
+            return True
+        else:
+            print("❌ Failed to stop process.")
+            return False
+            
+    except Exception as e:
+        print(f"\n❌ Error stopping process: {e}")
+        return False
 
 
 def check_module_installed(module_name):
@@ -450,21 +555,36 @@ def main():
     
     while True:
         print_banner()
-        print("What would you like to do?\n")
+        
+        # Check if dosimeter is running
+        running, pid = is_running()
+        if running:
+            print(f"🟢 Dosimeter is RUNNING (PID: {pid})")
+        else:
+            print("⚪ Dosimeter is STOPPED")
+        
+        print("\nWhat would you like to do?\n")
         print("  1. 🔧 Configure station (first-time setup or reconfigure)")
         print("  2. 📊 Start monitoring (local only, no data upload)")
         print("  3. 🌐 Start monitoring + upload (TEST mode)")
         print("  4. 🚀 Start monitoring + upload (PRODUCTION mode)")
         print("  5. 📋 List available serial ports")
         
+        # Show stop option if running
+        if running:
+            print("  6. 🛑 Stop the running dosimeter")
+            next_option = 7
+        else:
+            next_option = 6
+        
         # Show systemd option only on Linux
         if is_linux():
-            print("  6. ⚙️  Setup auto-start service (systemd)")
-            print("  7. ❌ Exit")
-            max_choice = 7
+            print(f"  {next_option}. ⚙️  Setup auto-start service (systemd)")
+            print(f"  {next_option + 1}. ❌ Exit")
+            max_choice = next_option + 1
         else:
-            print("  6. ❌ Exit")
-            max_choice = 6
+            print(f"  {next_option}. ❌ Exit")
+            max_choice = next_option
         
         print()
         
