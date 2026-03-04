@@ -34,9 +34,10 @@ from datetime import datetime
 from pathlib import Path
 
 
-SAVE_RATE = 60  # [s] - Period for aggregating and sending measurements
+SAVE_RATE = 900  # [s] - Period for aggregating and sending measurements (15 minutes minimum)
 MAX_QUEUE_SIZE = 100  # Maximum number of failed measurements to keep in queue
 MAX_QUEUE_AGE_DAYS = 7  # Maximum age of queued measurements in days
+MAX_LOCAL_DOSES = 100  # Maximum number of dose measurements to keep in local CSV
 
 # Global flag for graceful shutdown
 shutdown_requested = False
@@ -347,6 +348,57 @@ def save_queue(queue):
             json.dump(queue, f, indent=2)
     except Exception as e:
         print(f"Warning: Could not save queue file: {e}")
+
+
+def get_local_doses_file():
+    """Get the path to the local doses CSV file."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, 'local_dose_rates.csv')
+
+
+def save_local_dose(timestamp, value, hits_number, duration, device_id='', temp=0):
+    """Save dose measurement to local CSV (rolling 100 measurements)."""
+    local_file = get_local_doses_file()
+    
+    try:
+        # Read existing data
+        doses = []
+        if os.path.exists(local_file):
+            try:
+                with open(local_file, 'r', newline='') as f:
+                    reader = csv.DictReader(f)
+                    doses = list(reader)
+            except Exception as e:
+                print(f"Warning: Could not read local doses file: {e}")
+        
+        # Add new measurement
+        new_dose = {
+            'timestamp': timestamp,
+            'iso_time': datetime.utcfromtimestamp(float(timestamp)).isoformat(),
+            'dose_rate_usvh': f"{value:.4f}",
+            'hits_number': str(hits_number),
+            'duration_s': f"{duration:.1f}",
+            'device_id': device_id,
+            'temperature_c': f"{temp:.1f}"
+        }
+        doses.append(new_dose)
+        
+        # Keep only last MAX_LOCAL_DOSES measurements
+        if len(doses) > MAX_LOCAL_DOSES:
+            doses = doses[-MAX_LOCAL_DOSES:]
+        
+        # Write back to file
+        with open(local_file, 'w', newline='') as f:
+            fieldnames = ['timestamp', 'iso_time', 'dose_rate_usvh', 'hits_number', 
+                         'duration_s', 'device_id', 'temperature_c']
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(doses)
+        
+        return True
+    except Exception as e:
+        print(f"Warning: Could not save local dose measurement: {e}")
+        return False
 
 
 def add_to_queue(api_key, data, production=False):
@@ -896,6 +948,10 @@ def main():
                         device_id = period_events[-1]['device'] if period_events else 'unknown'
                         avg_temp = sum(e['temp'] for e in period_events) / len(period_events) if period_events else 0
                         print(f'  Device: {device_id}, Avg temp: {avg_temp:.1f}°C')
+                        
+                        # Save to local CSV (rolling 100 measurements)
+                        save_local_dose(start_time, value, hits_number, duration, device_id, avg_temp)
+                        print(f'  ✓ Saved to local dose history (last {MAX_LOCAL_DOSES} measurements)')
 
                         # Send to OpenRadiation API if enabled
                         if args.send_data:
@@ -965,7 +1021,15 @@ def main():
                 cps = hits_number / duration
                 value = cps * args.cps_to_usvh
                 
+                # Get device info
+                device_id = period_events[-1]['device'] if period_events else 'unknown'
+                avg_temp = sum(e['temp'] for e in period_events) / len(period_events) if period_events else 0
+                
                 print(f"  Final period: {hits_number} hits, {value:.4f} µSv/h")
+                
+                # Save to local CSV
+                save_local_dose(start_time, value, hits_number, duration, device_id, avg_temp)
+                print(f"  ✓ Saved final dose to local history")
                 
                 # Send if enabled
                 if args.send_data:
