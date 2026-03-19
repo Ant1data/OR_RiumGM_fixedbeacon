@@ -30,11 +30,11 @@ import signal
 import sys
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
-SAVE_RATE = 900  # [s] - Period for aggregating and sending measurements (15 minutes minimum)
+SAVE_RATE = 60  # [s] - Period for aggregating and sending measurements (15 minutes minimum)
 MAX_QUEUE_SIZE = 100  # Maximum number of failed measurements to keep in queue
 MAX_QUEUE_AGE_DAYS = 7  # Maximum age of queued measurements in days
 MAX_LOCAL_DOSES = 100  # Maximum number of dose measurements to keep in local CSV
@@ -71,12 +71,12 @@ def create_pid_file():
             # Check if process is actually running
             try:
                 os.kill(old_pid, 0)  # Signal 0 just checks if process exists
-                print(f"⚠️  Another instance is already running (PID: {old_pid})")
+                print(f"Another instance is already running (PID: {old_pid})")
                 print(f"   To stop it, run: kill {old_pid}")
                 return False
             except OSError:
                 # Process doesn't exist, remove stale PID file
-                print(f"→ Removing stale PID file (PID {old_pid} not running)")
+                print(f"Removing stale PID file (PID {old_pid} not running)")
                 os.remove(pid_file)
         except (ValueError, IOError):
             # Corrupted PID file, remove it
@@ -88,7 +88,7 @@ def create_pid_file():
             f.write(str(os.getpid()))
         return True
     except IOError as e:
-        print(f"⚠️  Warning: Could not create PID file: {e}")
+        print(f"Warning: Could not create PID file: {e}")
         return True  # Continue anyway
 
 
@@ -118,7 +118,7 @@ def check_dependencies():
     
     if missing:
         print("="*60)
-        print("⚠️  Missing required dependencies:")
+        print("Missing required dependencies:")
         for dep in missing:
             print(f"  - {dep}")
         print("="*60)
@@ -141,11 +141,11 @@ def check_dependencies():
                         text=True
                     )
                     if result.returncode == 0:
-                        print("✅ Dependencies installed successfully!")
+                        print("Dependencies installed successfully!")
                         print("Please run the script again.")
                         sys.exit(0)
                     else:
-                        print(f"❌ Installation failed: {result.stderr}")
+                        print(f"Installation failed: {result.stderr}")
                         sys.exit(1)
             except KeyboardInterrupt:
                 print("\nInstallation cancelled.")
@@ -204,18 +204,18 @@ def validate_dosimeter_connection(port, baud, timeout=5):
                             parsed = parse_rium_frame(frame)
                             if parsed:
                                 ser.close()
-                                print("✅ Rium GM detected!")
+                                print("Rium GM detected!")
                                 return True
         
         ser.close()
-        print("❌ No valid Rium frames detected")
+        print("No valid Rium frames detected")
         return False
         
     except serial.SerialException as e:
-        print(f"❌ Error: {e}")
+        print(f"Error: {e}")
         return False
     except Exception as e:
-        print(f"❌ Unexpected error: {e}")
+        print(f"Unexpected error: {e}")
         return False
 
 
@@ -230,7 +230,7 @@ def load_config(config_path='config.ini'):
     
     if not os.path.exists(config_path):
         print("="*60)
-        print("⚠️  Configuration file not found!")
+        print("Configuration file not found!")
         print("="*60)
         print(f"Expected location: {config_path}")
         print("\nCreating a template config.ini file...")
@@ -259,7 +259,7 @@ def load_config(config_path='config.ini'):
             f.write("# Example: station=Home, device=RiumGM_001\n")
             f.write("tags = \n")
         
-        print(f"✅ Template created: {config_path}")
+        print(f"Template created: {config_path}")
         print("="*60)
         print("\nConfiguration needed! You have 2 options:")
         print("  1. Run the setup wizard:")
@@ -374,7 +374,7 @@ def save_local_dose(timestamp, value, hits_number, duration, device_id='', temp=
         # Add new measurement
         new_dose = {
             'timestamp': timestamp,
-            'iso_time': datetime.utcfromtimestamp(float(timestamp)).isoformat(),
+            'iso_time': datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat(),
             'dose_rate_usvh': f"{value:.4f}",
             'hits_number': str(hits_number),
             'duration_s': f"{duration:.1f}",
@@ -419,7 +419,7 @@ def add_to_queue(api_key, data, production=False):
         queue = queue[-MAX_QUEUE_SIZE:]
     
     save_queue(queue)
-    print(f"  → Added to queue ({len(queue)} pending measurements)")
+    print(f"  Added to queue ({len(queue)} pending measurements)")
 
 
 def process_queue():
@@ -428,7 +428,7 @@ def process_queue():
     if not queue:
         return
     
-    print(f"\n→ Processing queue: {len(queue)} pending measurements...")
+    print(f"\nProcessing queue: {len(queue)} pending measurements...")
     
     successful = []
     failed = []
@@ -444,10 +444,10 @@ def process_queue():
             max_retries=1  # Single attempt for queued items
         ):
             successful.append(item)
-            print("✓")
+            print("OK")
         else:
             failed.append(item)
-            print("✗")
+            print("FAILED")
             # Don't spam if multiple failures
             if len(failed) >= 3:
                 print(f"  (Stopping after 3 consecutive failures)")
@@ -459,7 +459,7 @@ def process_queue():
     save_queue(failed)
     
     if successful:
-        print(f"✓ Successfully sent {len(successful)} queued measurements")
+        print(f"Successfully sent {len(successful)} queued measurements")
     if failed:
         print(f"  ({len(failed)} measurements still in queue)")
 
@@ -526,53 +526,53 @@ def post_measurement(api_key, data, production=False, max_retries=3):
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=30)
             if response.status_code == 201:
-                print("✓ Measurement posted successfully.")
+                print("Measurement posted successfully.")
                 return True
             else:
-                print(f"✗ Failed to post measurement: {response.status_code}")
+                print(f"Failed to post measurement: {response.status_code}")
                 print(f"  Response: {response.text}")
                 
                 # If it's a client error (4xx), don't retry
                 if 400 <= response.status_code < 500:
-                    print("  → Client error, not retrying.")
+                    print("  Client error, not retrying.")
                     return False
                     
                 # Server error (5xx), retry
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
-                    print(f"  → Retrying in {wait_time}s... (attempt {attempt + 2}/{max_retries})")
+                    print(f"  Retrying in {wait_time}s... (attempt {attempt + 2}/{max_retries})")
                     time.sleep(wait_time)
                     
         except requests.exceptions.Timeout:
-            print(f"✗ Error: Request timeout after 30s (attempt {attempt + 1}/{max_retries})")
+            print(f"Error: Request timeout after 30s (attempt {attempt + 1}/{max_retries})")
             if attempt < max_retries - 1:
                 wait_time = 2 ** attempt
-                print(f"  → Retrying in {wait_time}s...")
+                print(f"  Retrying in {wait_time}s...")
                 time.sleep(wait_time)
                 
         except requests.exceptions.ConnectionError as e:
-            print(f"✗ Error: No internet connection (attempt {attempt + 1}/{max_retries})")
+            print(f"Error: No internet connection (attempt {attempt + 1}/{max_retries})")
             if attempt < max_retries - 1:
                 wait_time = 5 * (attempt + 1)  # 5s, 10s, 15s
-                print(f"  → Will retry in {wait_time}s...")
-                print(f"  → (Measurements continue to be logged locally)")
+                print(f"  Will retry in {wait_time}s...")
+                print(f"  (Measurements continue to be logged locally)")
                 time.sleep(wait_time)
                 
         except Exception as e:
-            print(f"✗ Error posting measurement: {e} (attempt {attempt + 1}/{max_retries})")
+            print(f"Error posting measurement: {e} (attempt {attempt + 1}/{max_retries})")
             if attempt < max_retries - 1:
                 wait_time = 2 ** attempt
-                print(f"  → Retrying in {wait_time}s...")
+                print(f"  Retrying in {wait_time}s...")
                 time.sleep(wait_time)
     
     # All retries failed
-    print("✗ Failed to post measurement after all retries.")
-    print("  → Data has been saved locally in CSV file.")
+    print("Failed to post measurement after all retries.")
+    print("  Data has been saved locally in CSV file.")
     
     # Add to queue for later retry (only if max_retries > 1, to avoid queuing during queue processing)
     if max_retries > 1:
         add_to_queue(api_key, data, production)
-        print("  → Will retry automatically when connection is restored.")
+        print("  Will retry automatically when connection is restored.")
     
     return False
 
@@ -737,7 +737,7 @@ def main():
     if not port:
         if not candidates:
             print('='*60)
-            print('❌ ERROR: No serial ports detected!')
+            print('ERROR: No serial ports detected!')
             print('='*60)
             print('Please check:')
             print('  1. Rium GM dosimeter is connected via USB')
@@ -761,7 +761,7 @@ def main():
         
         if not port:
             print("="*60)
-            print("⚠️  Could not auto-detect Rium GM dosimeter")
+            print("Could not auto-detect Rium GM dosimeter")
             print("="*60)
             print("Detected serial ports:")
             for p in candidates:
@@ -805,15 +805,15 @@ def main():
     for attempt in range(max_retries):
         try:
             ser = open_serial(port, args.baud)
-            print(f'✅ Connected successfully!')
+            print(f'Connected successfully!')
             break
         except serial.SerialException as e:
             if attempt < max_retries - 1:
-                print(f'⚠️  Connection failed (attempt {attempt + 1}/{max_retries}): {e}')
+                print(f'Connection failed (attempt {attempt + 1}/{max_retries}): {e}')
                 print(f'   Retrying in {retry_delay} seconds...')
                 time.sleep(retry_delay)
             else:
-                print(f'❌ Failed to open serial port after {max_retries} attempts: {e}')
+                print(f'Failed to open serial port after {max_retries} attempts: {e}')
                 print('\nTroubleshooting:')
                 print('  • Check the device is connected')
                 print('  • Verify you have permissions (Linux: dialout group)')
@@ -821,11 +821,11 @@ def main():
                 print('  • Check if another program is using the port')
                 sys.exit(2)
         except Exception as e:
-            print(f'❌ Unexpected error opening port: {e}')
+            print(f'Unexpected error opening port: {e}')
             sys.exit(2)
     
     if ser is None:
-        print('❌ Could not establish connection')
+        print('Could not establish connection')
         sys.exit(2)
 
     # Ensure CSV header exists (add detailed columns)
@@ -847,6 +847,7 @@ def main():
         period_hit_times = []  # hits in current period
         period_events = []  # detailed events in current period
         time_last_save = time.time()  # Initialize to now
+        device_info_shown = False  # Track if device info has been shown
         
         while not shutdown_requested:
             try:
@@ -859,7 +860,7 @@ def main():
                     continue
 
                 ts = time.time()
-                iso = datetime.utcfromtimestamp(ts).isoformat() 
+                iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() 
                 
                 # Append to buffer
                 buffer.append(b[0])
@@ -893,8 +894,10 @@ def main():
                     parsed = parse_rium_frame(frame)
                     
                     if parsed:
-                        print(f'{iso}  frame detected  hex={raw_hex}')
-                        print(f'  Device: {parsed["device"]}, Count: {parsed["count"]}, Delay: {parsed["delay"]:.1f}s, Temp: {parsed["temp"]:.1f}°C')
+                        if not device_info_shown:
+                            print(f'Device: {parsed["device"]}')
+                            device_info_shown = True
+                        print(f'- {iso}  Count: {parsed["count"]}, Temp: {parsed["temp"]:.1f}C')
                         
                         # Write to CSV with parsed data
                         writer.writerow([
@@ -920,8 +923,10 @@ def main():
                             # number of hits is the number of count in every period event that is greater than 0
                             number_of_hits = sum(e['count'] for e in period_events)
                             hit_rate = number_of_hits / elapsed_hours if elapsed_hours > 0 else 0
+                            print(f'  Elapsed time: {elapsed_hours:.4f} hours')
+                            print(f'  Total hits in period: {number_of_hits}')
                             print(f'  Period hit rate: {hit_rate:.2f} hits/hour')
-                            print(f'  Total hits in period: {number_of_hits}, Elapsed time: {elapsed_hours:.4f} hours')
+                            
                     else:
                         # Frame detected but parsing failed
                         print(f'{iso}  Invalid frame detected  hex={raw_hex}')
@@ -934,7 +939,7 @@ def main():
                 # Periodic save to .dat and .json files
                 if ts - time_last_save > SAVE_RATE:
                     print(f"\n{'='*60}")
-                    print(f"Period summary [{datetime.utcfromtimestamp(time_last_save).strftime('%H:%M:%S')} - {datetime.utcfromtimestamp(ts).strftime('%H:%M:%S')}]")
+                    print(f"Period summary [{datetime.fromtimestamp(time_last_save, tz=timezone.utc).strftime('%H:%M:%S')} - {datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%H:%M:%S')}]")
                     
                     # Calculate dose rate
                     hits_number = sum(e['count'] for e in period_events)
@@ -945,7 +950,7 @@ def main():
                         cps = hits_number / duration
                         value = cps * args.cps_to_usvh
                         print(f'  Hits: {hits_number} in {duration:.1f}s')
-                        print(f'  CPS: {cps:.3f} → Dose rate: {value:.4f} µSv/h')
+                        print(f'  CPS: {cps:.3f} -> Dose rate: {value:.4f} uSv/h')
                         
                         # Get device info from last event
                         device_id = period_events[-1]['device'] if period_events else 'unknown'
@@ -954,7 +959,7 @@ def main():
                         
                         # Save to local CSV (rolling 100 measurements)
                         save_local_dose(start_time, value, hits_number, duration, device_id, avg_temp)
-                        print(f'  ✓ Saved to local dose history (last {MAX_LOCAL_DOSES} measurements)')
+                        print(f'  Saved to local dose history (last {MAX_LOCAL_DOSES} measurements)')
 
                         # Send to OpenRadiation API if enabled
                         if args.send_data:
@@ -964,7 +969,7 @@ def main():
                                 "latitude": float(latitude),
                                 "longitude": float(longitude),
                                 "value": float(round(value, 4)),
-                                "startTime": datetime.utcfromtimestamp(start_time).isoformat(),
+                                "startTime": datetime.fromtimestamp(start_time, tz=timezone.utc).isoformat(),
                                 "hitsNumber": hits_number,
                                 "hitsPeriod": int(duration)
                             }
@@ -983,7 +988,7 @@ def main():
                             if success:
                                 queue = load_queue()
                                 if queue:
-                                    print(f"\n→ Connection restored! Processing {len(queue)} queued measurements...")
+                                    print(f"\nConnection restored! Processing {len(queue)} queued measurements...")
                                     process_queue()
                     else:
                         print("  No hits detected in this period.")
@@ -1016,7 +1021,7 @@ def main():
             
             # Save final period if there's data
             if period_hit_times:
-                print("\n→ Saving final measurement period...")
+                print("\nSaving final measurement period...")
                 hits_number = len(period_hit_times)
                 start_time = period_hit_times[0]
                 end_time = period_hit_times[-1]
@@ -1032,7 +1037,7 @@ def main():
                 
                 # Save to local CSV
                 save_local_dose(start_time, value, hits_number, duration, device_id, avg_temp)
-                print(f"  ✓ Saved final dose to local history")
+                print(f"  Saved final dose to local history")
                 
                 # Send if enabled
                 if args.send_data:
@@ -1053,24 +1058,24 @@ def main():
                     
                     post_measurement(api_key, data, args.production)
             
-            print("\n→ Closing serial port...")
+            print("\nClosing serial port...")
             
     finally:
         try:
             ser.close()
-            print("  ✓ Serial port closed")
+            print("  Serial port closed")
         except Exception:
             pass
         
         try:
             csvfile.close()
-            print("  ✓ CSV file closed")
+            print("  CSV file closed")
         except Exception:
             pass
         
         # Remove PID file
         remove_pid_file()
-        print("  ✓ PID file removed")
+        print("  PID file removed")
         
         print("\n" + "="*60)
         print("  SHUTDOWN COMPLETE")
