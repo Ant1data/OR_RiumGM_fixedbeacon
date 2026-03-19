@@ -472,7 +472,7 @@ def parse_rium_frame(frame: bytes) -> dict:
     - A (4 bytes): Device ID (32 bits)
     - B (2 bytes): Count (16 bits)
     - C (2 bytes): Delay in deciseconds (16 bits)
-    - D (2 bytes): Temperature in deciseconds (16 bits)
+    - D (2 bytes): Temperature in deciseconds (16 bits) 
     
     Returns dict with parsed data or None if invalid frame.
     """
@@ -869,8 +869,8 @@ def main():
                 if len(buffer) > 512:
                     del buffer[0:len(buffer) - 512]
 
-                # Immediate Hit detection: check last 12-byte window
-                hit = False
+                # Immediate frame detection: check last 12-byte window
+                frame = False
                 if len(buffer) >= 12:
                     # Look for C1 00 header in the last bytes
                     # Check multiple possible positions in case of misalignment
@@ -879,13 +879,13 @@ def main():
                             frame = bytes(buffer[i:i+12])
                             # Verify it's a valid frame
                             if parse_rium_frame(frame):
-                                hit = True
+                                frame = True
                                 # Adjust buffer to point to this frame
                                 del buffer[0:i]
                                 break         
 
-                # If a Hit was detected, log it immediately with the 12-byte frame
-                if hit:
+                # If a frame was detected, log it immediately with the 12-byte frame
+                if frame:
                     frame = bytes(buffer[-12:])
                     raw_hex = hexdump(frame)
                     
@@ -893,7 +893,7 @@ def main():
                     parsed = parse_rium_frame(frame)
                     
                     if parsed:
-                        print(f'{iso}  HIT detected  hex={raw_hex}')
+                        print(f'{iso}  frame detected  hex={raw_hex}')
                         print(f'  Device: {parsed["device"]}, Count: {parsed["count"]}, Delay: {parsed["delay"]:.1f}s, Temp: {parsed["temp"]:.1f}°C')
                         
                         # Write to CSV with parsed data
@@ -917,8 +917,11 @@ def main():
                         # Calculate hit rate for current period
                         if len(period_hit_times) > 1:
                             elapsed_hours = (ts - period_hit_times[0]) / 3600  # hours
-                            hit_rate = len(period_hit_times) / elapsed_hours if elapsed_hours > 0 else 0
+                            # number of hits is the number of count in every period event that is greater than 0
+                            number_of_hits = sum(e['count'] for e in period_events)
+                            hit_rate = number_of_hits / elapsed_hours if elapsed_hours > 0 else 0
                             print(f'  Period hit rate: {hit_rate:.2f} hits/hour')
+                            print(f'  Total hits in period: {number_of_hits}, Elapsed time: {elapsed_hours:.4f} hours')
                     else:
                         # Frame detected but parsing failed
                         print(f'{iso}  Invalid frame detected  hex={raw_hex}')
@@ -934,7 +937,7 @@ def main():
                     print(f"Period summary [{datetime.utcfromtimestamp(time_last_save).strftime('%H:%M:%S')} - {datetime.utcfromtimestamp(ts).strftime('%H:%M:%S')}]")
                     
                     # Calculate dose rate
-                    hits_number = len(period_hit_times)
+                    hits_number = sum(e['count'] for e in period_events)
                     if hits_number > 0:
                         start_time = period_hit_times[0]
                         end_time = period_hit_times[-1]
