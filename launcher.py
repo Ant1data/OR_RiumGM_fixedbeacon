@@ -608,6 +608,9 @@ def run_command(cmd, description):
         return False
 
 
+DEFAULT_CPS_TO_USVH_FUNC = "(0.00000003751 * (cps * 60 - 4)**2 + 0.00965 * (cps * 60 - 4)) * 0.85"
+
+
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     main_script = os.path.join(script_dir, 'read_dosimeter.py')
@@ -669,7 +672,7 @@ def main():
                 print("This will test if your dosimeter is working correctly.")
                 print("Press Ctrl+C to stop when you're satisfied it's working.\n")
                 
-                run_command([sys.executable, main_script], "")
+                run_command([sys.executable, main_script, '--cps-to-usvh-func', DEFAULT_CPS_TO_USVH_FUNC], "")
                 input("\nPress Enter to continue...")
                 
             elif choice == '3':
@@ -679,12 +682,16 @@ def main():
                 print("Data will be marked as 'test' in the database")
                 print("Press Ctrl+C to stop when you're satisfied it's working.\n")
                 
-                success = run_command([sys.executable, main_script, '--send-data'], "")
+                success = run_command([
+                    sys.executable,
+                    main_script,
+                    '--send-data',
+                    '--cps-to-usvh-func',
+                    DEFAULT_CPS_TO_USVH_FUNC
+                ], "")
                 
-                # After successful TEST, propose to setup systemd service (Linux only)
+                # After successful TEST, propose systemd setup (Linux only)
                 if success and is_linux():
-                    print("\n" + "="*70)
-                    print("✅ Test completed successfully!")
                     print("="*70)
                     print("\nYour dosimeter is working and sending data to OpenRadiation.")
                     print("You can now set it up to run automatically (survives power cuts).")
@@ -711,7 +718,14 @@ def main():
                     print("\n→ Starting monitoring with OpenRadiation upload (PRODUCTION)")
                     print("-" * 70)
                     print("Press Ctrl+C to stop\n")
-                    run_command([sys.executable, main_script, '--send-data', '--production'], "")
+                    run_command([
+                        sys.executable,
+                        main_script,
+                        '--send-data',
+                        '--production',
+                        '--cps-to-usvh-func',
+                        DEFAULT_CPS_TO_USVH_FUNC
+                    ], "")
                 else:
                     print("Operation cancelled.")
                 input("\nPress Enter to continue...")

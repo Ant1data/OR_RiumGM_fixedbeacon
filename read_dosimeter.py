@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Optional
 
 
-SAVE_RATE = 30  # [s] - Period for aggregating and sending measurements (15 minutes minimum)
+SAVE_RATE = 900  # [s] - Period for aggregating and sending measurements (15 minutes minimum)
 MAX_QUEUE_SIZE = 100  # Maximum number of failed measurements to keep in queue
 MAX_QUEUE_AGE_DAYS = 7  # Maximum age of queued measurements in days
 MAX_LOCAL_DOSES = 100  # Maximum number of dose measurements to keep in local CSV
@@ -340,6 +340,22 @@ def open_serial(port, baud, timeout=None):
 
 def hexdump(b: bytes) -> str:
     return ' '.join(f'{x:02x}' for x in b)
+
+
+def convert_cps_to_usvh(cps, factor, formula=None):
+    """Convert CPM (counts per second) to µSv/h using either a factor or formula."""
+    if formula:
+        # Accept '^' as power for convenience, convert to Python '**'
+        safe_formula = formula.replace('^', '**')
+        safe_locals = {'cps': cps, 'abs': abs, 'max': max, 'min': min, 'pow': pow}
+        try:
+            value = eval(safe_formula, {'__builtins__': {}}, safe_locals)
+            return float(value)
+        except Exception as e:
+            print(f"Warning: invalid cps-to-usvh formula '{formula}': {e}")
+            print(f"Falling back to simple factor conversion: cps * {factor}")
+            return cps * factor
+    return cps * factor
 
 
 def get_queue_file():
@@ -653,6 +669,7 @@ def main():
 
     # Sensitivity of Rium GM : Sensitivity 2.6 cps/µSv/h according to https://www.riummanufacturing.com/products/gm-tubes/ and user reports. This means 1 CPS corresponds to approximately 0.385 µSv/h, so the conversion factor is 1/2.6.
     parser.add_argument('--cps-to-usvh', type=float, default=1/2.6, help='Conversion factor from CPS to µSv/h (default: 1/2.6)')
+    parser.add_argument('--cps-to-usvh-func', default=None, help='Conversion formula of cps to µSv/h, e.g. "(0.00000003751 * (cps * 60 - 4)**2 + 0.00965 * (cps * 60 - 4)) * 0.85"')
     parser.add_argument('--production', action='store_true', help='Set reportContext to routine (real data) instead of test. Use with caution!')
     parser.add_argument('--tag', action='append', default=[], help='Add tags to measurements (can be used multiple times, e.g. --tag location=Paris --tag device=GM1)')
     parser.add_argument('--set-password', help='Set password for a user ID in the OS keyring (e.g. --set-password myuser)')
@@ -1039,7 +1056,7 @@ def main():
                         end_time = period_hit_times[-1]
                         duration = end_time - start_time if end_time > start_time else SAVE_RATE
                         cps = hits_number / duration
-                        value = cps * args.cps_to_usvh
+                        value = convert_cps_to_usvh(cps, args.cps_to_usvh, args.cps_to_usvh_func)
                         print(f'  Hits: {hits_number} in {duration:.1f}s')
                         print(f'  CPS: {cps:.3f} -> Dose rate: {value:.4f} uSv/h')
                         
@@ -1061,8 +1078,10 @@ def main():
                                 "longitude": float(longitude),
                                 "value": float(round(value, 4)),
                                 "startTime": datetime.fromtimestamp(start_time, tz=timezone.utc).isoformat(),
+                                "endTime": datetime.fromtimestamp(end_time, tz=timezone.utc).isoformat(),
                                 "hitsNumber": hits_number,
-                                "hitsPeriod": int(duration)
+                                "description": f"Rium GM fixed beacon measurement",
+                                "calibrationFunction": f"{args.cps_to_usvh_func}"
                             }
                             
                             # Add username if provided
@@ -1121,7 +1140,7 @@ def main():
                 end_time = period_hit_times[-1]
                 duration = end_time - start_time if end_time > start_time else 1
                 cps = hits_number / duration
-                value = cps * args.cps_to_usvh
+                value = convert_cps_to_usvh(cps, args.cps_to_usvh, args.cps_to_usvh_func)
                 
                 # Get device info
                 device_id = period_events[-1]['device'] if period_events else 'unknown'
@@ -1142,8 +1161,10 @@ def main():
                         "longitude": float(longitude),
                         "value": float(round(value, 4)),
                         "startTime": datetime.utcfromtimestamp(start_time).isoformat(),
+                        "endTime": datetime.utcfromtimestamp(end_time).isoformat(),
                         "hitsNumber": hits_number,
-                        "hitsPeriod": int(duration)
+                        "description": f"Rium GM fixed beacon measurement",
+                        "calibrationFunction": f"{args.cps_to_usvh_func}"
                     }
                     if username:
                         data["userId"] = username
