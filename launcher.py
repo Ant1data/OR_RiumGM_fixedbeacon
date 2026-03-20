@@ -14,6 +14,7 @@ import platform
 import importlib.util
 import signal
 import time
+import getpass
 
 
 def is_linux():
@@ -368,7 +369,7 @@ def print_banner():
 
 def get_input(prompt, default=None, required=False):
     """Get user input with optional default value."""
-    if default:
+    if default is not None:
         full_prompt = f"{prompt} [{default}]: "
     else:
         full_prompt = f"{prompt}: "
@@ -376,7 +377,7 @@ def get_input(prompt, default=None, required=False):
     while True:
         value = input(full_prompt).strip()
         
-        if not value and default:
+        if not value and default is not None:
             return default
         
         if not value and required:
@@ -386,10 +387,18 @@ def get_input(prompt, default=None, required=False):
         return value
 
 
-def get_float(prompt, required=False):
+def get_float(prompt, default=None, required=False):
     """Get a float input from user."""
+    if default is not None:
+        full_prompt = f"{prompt} [{default}]"
+    else:
+        full_prompt = prompt
+    
     while True:
-        value = input(f"{prompt}: ").strip()
+        value = input(f"{full_prompt}: ").strip()
+        
+        if not value and default is not None:
+            return default
         
         if not value and not required:
             return None
@@ -410,13 +419,22 @@ def run_configuration_wizard():
     print("="*70)
     print()
     
-    # Check if config already exists
+    # Load existing config if it exists
+    existing_config = {}
     if os.path.exists(config_file):
+        config = configparser.ConfigParser()
+        config.read(config_file)
+        existing_config = {
+            'api_key': config.get('DEFAULT', 'api_key', fallback=''),
+            'username': config.get('DEFAULT', 'username', fallback=''),
+            'password': config.get('DEFAULT', 'password', fallback=''),
+            'latitude': config.get('DEFAULT', 'latitude', fallback=''),
+            'longitude': config.get('DEFAULT', 'longitude', fallback=''),
+            'tags': config.get('DEFAULT', 'tags', fallback='')
+        }
         print(f"⚠️  Configuration file already exists: {config_file}")
-        overwrite = input("Do you want to overwrite it? (yes/no) [no]: ").strip().lower()
-        if overwrite not in ['yes', 'y']:
-            print("Configuration cancelled. Existing file preserved.")
-            return False
+        print("You can modify individual settings below.")
+        print("Press Enter to keep current values.")
         print()
     
     print("This wizard will help you configure your fixed Rium GM dosimeter station.")
@@ -431,7 +449,41 @@ def run_configuration_wizard():
     print("  • Go to your profile to find your API key")
     print()
     
-    api_key = get_input("Enter your OpenRadiation API key", required=True)
+    current_api_key = existing_config.get('api_key', '')
+    if current_api_key:
+        masked_key = '*' * 8 + current_api_key[-4:] if len(current_api_key) > 4 else current_api_key
+        print(f"Current API Key: {masked_key}")
+    
+    api_key = get_input("Enter your OpenRadiation API key (press Enter to skip)", default=current_api_key, required=False)
+    print()
+    
+    # Username
+    print("1.1️⃣  OpenRadiation Username")
+    print("-" * 70)
+    print("Enter your OpenRadiation account username.")
+    print()
+    
+    current_username = existing_config.get('username', '')
+    if current_username:
+        print(f"Current Username: {current_username}")
+    
+    username = get_input("Enter your OpenRadiation username (press Enter to skip)", default=current_username)
+    print()
+    
+    # Password
+    print("1.2️⃣  OpenRadiation Password")
+    print("-" * 70)
+    print("Enter your OpenRadiation account password.")
+    print()
+    
+    current_password = existing_config.get('password', '')
+    if current_password:
+        masked_pass = '*' * len(current_password)
+        print(f"Current Password: {masked_pass}")
+        print("(Press Enter to keep current password)")
+    
+    password_input = getpass.getpass("Enter password (press Enter to skip): ").strip()
+    password = password_input if password_input else current_password
     print()
     
     # Location
@@ -444,60 +496,68 @@ def run_configuration_wizard():
     print("  • Format: Decimal degrees (e.g., 48.8566 for latitude)")
     print()
     
-    latitude = get_float("Latitude (e.g., 48.8566)", required=True)
-    longitude = get_float("Longitude (e.g., 2.3522)", required=True)
+    current_latitude = existing_config.get('latitude', '')
+    if current_latitude:
+        print(f"Current Latitude: {current_latitude}")
+    
+    try:
+         latitude = get_float("Latitude (e.g., 48.8566) (press Enter to skip)", default=float(current_latitude) if current_latitude else None, required=False)
+    except (ValueError, TypeError):
+        latitude = get_float("Latitude (e.g., 48.8566) (press Enter to skip)", required=False)
+    
+    current_longitude = existing_config.get('longitude', '')
+    if current_longitude:
+        print(f"Current Longitude: {current_longitude}")
+    
+    try:
+        longitude = get_float("Longitude (e.g., 2.3522) (press Enter to skip)", default=float(current_longitude) if current_longitude else None, required=False)
+    except (ValueError, TypeError):
+        longitude = get_float("Longitude (e.g., 2.3522) (press Enter to skip)", required=False)
     print()
     
-    # User ID
-    print("3️⃣  User Identification (Optional)")
+    # Tags
+    print("3️⃣  Station Tags (Optional)")
     print("-" * 70)
-    print("Associate measurements with your OpenRadiation user account.")
+    print("Add descriptive tags to help identify and filter your station's data.")
+    print("Note: All tags will automatically be prefixed with 'fixed_beacon_'")
     print()
-    
-    user_id = get_input("Enter your OpenRadiation user ID (press Enter to skip)")
+    print("Examples (enter WITHOUT the prefix):")
+    print("  • station_name=HomeStation  → becomes: fixed_beacon_station_name=HomeStation")
+    print("  • location=Paris  → becomes: fixed_beacon_location=Paris")
+    print("  • device=RiumGM_001  → becomes: fixed_beacon_device=RiumGM_001")
+    print("  • altitude=100m  → becomes: fixed_beacon_altitude=100m")
     print()
+        
+    current_tags = existing_config.get('tags', '')
+    if current_tags:
+        print(f"Current Tags: {current_tags}")
     
-    # Tags (only if user_id is provided)
-    tags = ""
-    if user_id:
-        print("4️⃣  Station Tags (Optional)")
-        print("-" * 70)
-        print("Add descriptive tags to help identify and filter your station's data.")
-        print("Note: All tags will automatically be prefixed with 'fixed_beacon_'")
-        print()
-        print("Examples (enter WITHOUT the prefix):")
-        print("  • station_name=HomeStation  → becomes: fixed_beacon_station_name=HomeStation")
-        print("  • location=Paris  → becomes: fixed_beacon_location=Paris")
-        print("  • device=RiumGM_001  → becomes: fixed_beacon_device=RiumGM_001")
-        print("  • altitude=100m  → becomes: fixed_beacon_altitude=100m")
-        print()
-        print("Enter tags (comma-separated, press Enter to skip):")
-        
-        tags = get_input("Tags")
-        
-        # Add fixed_beacon_ prefix if user provided tags
-        if tags:
-            tag_list = [t.strip() for t in tags.split(',') if t.strip()]
-            prefixed_tags = []
-            for tag in tag_list:
-                if not tag.startswith('fixed_beacon_'):
-                    tag = f'fixed_beacon_{tag}'
-                prefixed_tags.append(tag)
-            tags = ', '.join(prefixed_tags)
-            print(f"\n  → Tags with prefix: {tags}")
-        
-        print()
+    tags_input = get_input("Tags (comma-separated, press Enter to skip)", default=current_tags)
+    
+    # Add fixed_beacon_ prefix if user provided tags
+    if tags_input:
+        tag_list = [t.strip() for t in tags_input.split(',') if t.strip()]
+        prefixed_tags = []
+        for tag in tag_list:
+            if not tag.startswith('fixed_beacon_'):
+                tag = f'fixed_beacon_{tag}'
+            prefixed_tags.append(tag)
+        tags = ', '.join(prefixed_tags)
+        print(f"\n  → Tags with prefix: {tags}")
     else:
-        print("ℹ️  Tags skipped (requires User ID to be set)")
-        print()
+        tags = current_tags
+    print()
     
     # Summary
     print("="*70)
     print("Configuration Summary:")
     print("="*70)
-    print(f"API Key: {'*' * 8}{api_key[-4:] if len(api_key) > 4 else api_key}")
-    print(f"Location: {latitude}, {longitude}")
-    print(f"User ID: {user_id if user_id else 'Not set'}")
+    masked_api = '*' * 8 + api_key[-4:] if api_key and len(api_key) > 4 else api_key if api_key else 'Not set'
+    print(f"API Key: {masked_api}")
+    print(f"Username: {username if username else 'Not set'}")
+    print(f"Password: {'*' * len(password) if password else 'Not set'}")
+    location_str = f"{latitude}, {longitude}" if latitude and longitude else "Not set"
+    print(f"Location: {location_str}")
     print(f"Tags: {tags if tags else 'None'}")
     print("="*70)
     print()
@@ -507,10 +567,11 @@ def run_configuration_wizard():
         # Create config
         config = configparser.ConfigParser()
         config['DEFAULT'] = {
-            'api_key': api_key,
-            'latitude': str(latitude),
-            'longitude': str(longitude),
-            'user_id': user_id if user_id else '',
+            'api_key': api_key if api_key else '',
+            'username': username if username else '',
+            'password': password if password else '',
+            'latitude': str(latitude) if latitude else current_latitude,
+            'longitude': str(longitude) if longitude else current_longitude,
             'tags': tags if tags else ''
         }
         

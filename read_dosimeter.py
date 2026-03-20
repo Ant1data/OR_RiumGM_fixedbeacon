@@ -23,6 +23,7 @@ import argparse
 import configparser
 import csv
 import glob
+import getpass
 import json
 import os
 import re
@@ -32,12 +33,16 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 
-SAVE_RATE = 60  # [s] - Period for aggregating and sending measurements (15 minutes minimum)
+SAVE_RATE = 30  # [s] - Period for aggregating and sending measurements (15 minutes minimum)
 MAX_QUEUE_SIZE = 100  # Maximum number of failed measurements to keep in queue
 MAX_QUEUE_AGE_DAYS = 7  # Maximum age of queued measurements in days
 MAX_LOCAL_DOSES = 100  # Maximum number of dose measurements to keep in local CSV
+
+# Service name for storing passwords in system keyring
+KEYRING_SERVICE_NAME = "openradiation"
 
 # Global flag for graceful shutdown
 shutdown_requested = False
@@ -115,6 +120,11 @@ def check_dependencies():
         import requests
     except ImportError:
         missing.append('requests')
+    
+    try:
+        import keyring
+    except ImportError:
+        missing.append('keyring')
     
     if missing:
         print("="*60)
@@ -237,6 +247,8 @@ def load_config(config_path='config.ini'):
         
         config['DEFAULT'] = {
             'api_key': '',
+            'username': '',
+            'password': '',
             'latitude': '',
             'longitude': '',
             'user_id': '',
@@ -249,6 +261,9 @@ def load_config(config_path='config.ini'):
             f.write("[DEFAULT]\n")
             f.write("# Get your API key from: https://www.openradiation.org/\n")
             f.write("api_key = \n\n")
+            f.write("# OpenRadiation account credentials\n")
+            f.write("username = \n")
+            f.write("password = \n\n")
             f.write("# Fixed station GPS coordinates (decimal degrees)\n")
             f.write("# Example: 48.8566 for Paris\n")
             f.write("latitude = \n")
@@ -288,6 +303,33 @@ def load_config(config_path='config.ini'):
     
     config.read(config_path)
     return config['DEFAULT']
+
+
+def get_keyring_password(username: str) -> Optional[str]:
+    """Retrieve a stored password from the OS keyring."""
+    try:
+        import keyring
+    except ImportError:
+        return None
+
+    try:
+        return keyring.get_password(KEYRING_SERVICE_NAME, username)
+    except Exception:
+        return None
+
+
+def set_keyring_password(username: str, password: str) -> bool:
+    """Store a password in the OS keyring."""
+    try:
+        import keyring
+    except ImportError:
+        return False
+
+    try:
+        keyring.set_password(KEYRING_SERVICE_NAME, username, password)
+        return True
+    except Exception:
+        return False
 
 
 def open_serial(port, baud, timeout=None):
@@ -497,19 +539,25 @@ def parse_rium_frame(frame: bytes) -> dict:
     }
 
 
-def post_measurement(api_key, data, production=False, max_retries=3):
+def post_measurement(api_key, data, production, max_retries=3):
     """
     Post measurement data to OpenRadiation API with retry logic.
     Returns True if successful, False otherwise.
     """
+    print("\nPosting measurement to OpenRadiation API...")
+    print("production:", production )
+    print
+
     url = "https://submit.openradiation.net/measurements"
     payload = {
         "apiKey": api_key,
         "data": data 
     }
     if not production:
+        print("Sending in TEST mode (reportContext=test)")
         payload["data"]["reportContext"] = "test"
     else:
+        print("Sending in PRODUCTION mode (reportContext=routine)")
         payload["data"]["reportContext"] = "routine"
     
     headers = {
@@ -518,7 +566,8 @@ def post_measurement(api_key, data, production=False, max_retries=3):
     
     # Show sent data for debugging
     print("Prepared measurement data for API:")
-    print(json.dumps(payload, indent=2))
+    # print json but not password
+    print(json.dumps({**payload, "data": {**payload["data"], "userPwd": "****" if "userPwd" in payload["data"] else None}}, indent=2))
     print(f"API endpoint: {url}")
     
     # Retry loop with exponential backoff
@@ -606,8 +655,34 @@ def main():
     parser.add_argument('--cps-to-usvh', type=float, default=1/2.6, help='Conversion factor from CPS to µSv/h (default: 1/2.6)')
     parser.add_argument('--production', action='store_true', help='Set reportContext to routine (real data) instead of test. Use with caution!')
     parser.add_argument('--tag', action='append', default=[], help='Add tags to measurements (can be used multiple times, e.g. --tag location=Paris --tag device=GM1)')
+    parser.add_argument('--set-password', help='Set password for a user ID in the OS keyring (e.g. --set-password myuser)')
+    parser.add_argument('--clear-password', help='Clear stored password for a user ID from the OS keyring (e.g. --clear-password myuser)')
     
     args = parser.parse_args()
+    print("Production : ", args.production)
+    print("send_data : ", args.send_data)
+    # Handle password management commands first (before other processing)
+    if args.set_password:
+        if not sys.stdin.isatty():
+            print("Error: --set-password requires interactive terminal")
+            sys.exit(1)
+        password = getpass.getpass(f"Enter password for user '{args.set_password}': ")
+        if set_keyring_password(args.set_password, password):
+            print(f"Password stored securely for user '{args.set_password}'")
+        else:
+            print("Failed to store password")
+        sys.exit(0)
+    
+    if args.clear_password:
+        try:
+            import keyring
+            keyring.delete_password(KEYRING_SERVICE_NAME, args.clear_password)
+            print(f"Password cleared for user '{args.clear_password}'")
+        except ImportError:
+            print("Error: keyring not available")
+        except Exception as e:
+            print(f"Error clearing password: {e}")
+        sys.exit(0)
 
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
@@ -664,6 +739,20 @@ def main():
             api_key = None
     
     user_id = args.user_id if args.user_id else (config.get('user_id') if config else None)
+    username = config.get('username') if config else None
+    user_pwd = config.get('password') if config else None
+
+    # If we are going to send data and no password from config, try keyring/prompt
+    if args.send_data and user_id and not user_pwd:
+        user_pwd = get_keyring_password(user_id)
+        if not user_pwd and sys.stdin.isatty():
+            # Prompt for password once, store it securely for future runs
+            user_pwd = getpass.getpass(f"Password for user '{user_id}': ")
+            if user_pwd:
+                if not set_keyring_password(user_id, user_pwd):
+                    print("Warning: could not store password in keyring")
+        elif not user_pwd:
+            print("Warning: no password stored for user; API upload may fail")
     
     # Parse tags from config file (comma-separated) and merge with CLI tags
     # Force "fixed_beacon_" prefix on all tags
@@ -688,6 +777,8 @@ def main():
     if config:
         print(f"Configuration file: {args.config}")
         print(f"  API Key: {'*' * 8 + api_key[-4:] if api_key and len(api_key) > 4 else 'NOT SET'}")
+        print(f"  Username: {username if username else 'NOT SET'}")
+        print(f"  Password: {'*' * len(user_pwd) if user_pwd else 'NOT SET'}")
         print(f"  Location: {latitude}, {longitude}" if latitude and longitude else "  Location: NOT SET")
         print(f"  User ID: {user_id if user_id else 'NOT SET'}")
         print(f"  Tags: {', '.join(all_tags) if all_tags else 'NONE'}")
@@ -974,9 +1065,12 @@ def main():
                                 "hitsPeriod": int(duration)
                             }
                             
-                            # Add user ID if provided
-                            if user_id:
-                                data["userId"] = user_id
+                            # Add username if provided
+                            if username:
+                                data["userId"] = username
+                            # Add password if provided
+                            if user_pwd:
+                                data["userPwd"] = user_pwd
                             # Add tags if provided
                             if all_tags:
                                 data["tags"] = all_tags
@@ -1051,8 +1145,12 @@ def main():
                         "hitsNumber": hits_number,
                         "hitsPeriod": int(duration)
                     }
+                    if username:
+                        data["userId"] = username
                     if user_id:
                         data["userId"] = user_id
+                    if user_pwd:
+                        data["userPwd"] = user_pwd
                     if all_tags:
                         data["tags"] = all_tags
                     
