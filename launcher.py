@@ -16,6 +16,29 @@ import signal
 import time
 import getpass
 
+KEYRING_SERVICE_NAME = 'openradiation'
+
+
+def get_keyring_password(username):
+    try:
+        import keyring
+        return keyring.get_password(KEYRING_SERVICE_NAME, username)
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
+def set_keyring_password(username, password):
+    try:
+        import keyring
+        keyring.set_password(KEYRING_SERVICE_NAME, username, password)
+        return True
+    except ImportError:
+        return False
+    except Exception:
+        return False
+
 
 def is_linux():
     """Check if running on Linux/Raspberry Pi."""
@@ -469,21 +492,47 @@ def run_configuration_wizard():
     
     username = get_input("Enter your OpenRadiation username (press Enter to skip)", default=current_username)
     print()
-    
+
+    user_id = username  # use username as userId always
     # Password
     print("1.2️⃣  OpenRadiation Password")
     print("-" * 70)
     print("Enter your OpenRadiation account password.")
     print()
     
-    current_password = existing_config.get('password', '')
-    if current_password:
-        masked_pass = '*' * len(current_password)
-        print(f"Current Password: {masked_pass}")
-        print("(Press Enter to keep current password)")
-    
-    password_input = getpass.getpass("Enter password (press Enter to skip): ").strip()
-    password = password_input if password_input else current_password
+    current_password = None
+    credential_key = None
+    if existing_config.get('user_id'):
+        credential_key = existing_config.get('user_id')
+    elif existing_config.get('username'):
+        credential_key = existing_config.get('username')
+
+    if credential_key:
+        keyring_password = get_keyring_password(credential_key)
+        if keyring_password:
+            print(f"Current password is stored in OS keyring for {credential_key}.")
+        else:
+            print(f"No password found in OS keyring for {credential_key}.")
+
+    password_input = getpass.getpass("Enter password (press Enter to keep existing keyring value or skip): ").strip()
+    if password_input:
+        password = password_input
+    else:
+        password = keyring_password if credential_key else None
+    print()
+
+    # Save password securely to keyring (if provided)
+    effective_user_key = user_id or username
+    if password and effective_user_key:
+        if set_keyring_password(effective_user_key, password):
+            print(f"Password stored securely in OS keyring under '{effective_user_key}'.")
+        else:
+            print("Warning: Unable to store password in OS keyring.")
+    elif password and not effective_user_key:
+        print("Warning: password entered but no userId/username provided, will not be saved.")
+
+    # do not store password in config.ini
+    print("(Password is NOT saved in config.ini, use keyring for secure storage.)")
     print()
     
     # Location
@@ -554,8 +603,8 @@ def run_configuration_wizard():
     print("="*70)
     masked_api = '*' * 8 + api_key[-4:] if api_key and len(api_key) > 4 else api_key if api_key else 'Not set'
     print(f"API Key: {masked_api}")
-    print(f"Username: {username if username else 'Not set'}")
-    print(f"Password: {'*' * len(password) if password else 'Not set'}")
+    print(f"Username/User ID: {user_id if user_id else 'Not set'}")
+    print(f"Password: {'Stored in keyring' if password else 'Not set'}")
     location_str = f"{latitude}, {longitude}" if latitude and longitude else "Not set"
     print(f"Location: {location_str}")
     print(f"Tags: {tags if tags else 'None'}")
@@ -569,7 +618,6 @@ def run_configuration_wizard():
         config['DEFAULT'] = {
             'api_key': api_key if api_key else '',
             'username': username if username else '',
-            'password': password if password else '',
             'latitude': str(latitude) if latitude else current_latitude,
             'longitude': str(longitude) if longitude else current_longitude,
             'tags': tags if tags else ''

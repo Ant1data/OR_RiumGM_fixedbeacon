@@ -248,7 +248,6 @@ def load_config(config_path='config.ini'):
         config['DEFAULT'] = {
             'api_key': '',
             'username': '',
-            'password': '',
             'latitude': '',
             'longitude': '',
             'user_id': '',
@@ -262,8 +261,9 @@ def load_config(config_path='config.ini'):
             f.write("# Get your API key from: https://www.openradiation.org/\n")
             f.write("api_key = \n\n")
             f.write("# OpenRadiation account credentials\n")
+            f.write("# Use either user_id or username plus password in OS keyring (not stored here).\n")
             f.write("username = \n")
-            f.write("password = \n\n")
+            f.write("# password = (not stored in config.ini; use keyring command or setup wizard)\n\n")
             f.write("# Fixed station GPS coordinates (decimal degrees)\n")
             f.write("# Example: 48.8566 for Paris\n")
             f.write("latitude = \n")
@@ -757,16 +757,29 @@ def main():
     
     user_id = args.user_id if args.user_id else (config.get('user_id') if config else None)
     username = config.get('username') if config else None
+
+    # Always use OpenRadiation username as userId, unless explicit user_id override given
+    if not user_id and username:
+        user_id = username
+
     user_pwd = config.get('password') if config else None
 
-    # If we are going to send data and no password from config, try keyring/prompt
-    if args.send_data and user_id and not user_pwd:
-        user_pwd = get_keyring_password(user_id)
+    credential_key = user_id or username
+
+    # If plain-text password is found in config, save it to keyring and use it
+    if user_pwd and credential_key:
+        if set_keyring_password(credential_key, user_pwd):
+            print(f"Password migrated to OS keyring for '{credential_key}'.")
+        user_pwd = user_pwd  # still use current value for this session
+
+    # If we are going to send data and no password present, try keyring/prompt
+    if args.send_data and credential_key and not user_pwd:
+        user_pwd = get_keyring_password(credential_key)
         if not user_pwd and sys.stdin.isatty():
             # Prompt for password once, store it securely for future runs
-            user_pwd = getpass.getpass(f"Password for user '{user_id}': ")
+            user_pwd = getpass.getpass(f"Password for user '{credential_key}': ")
             if user_pwd:
-                if not set_keyring_password(user_id, user_pwd):
+                if not set_keyring_password(credential_key, user_pwd):
                     print("Warning: could not store password in keyring")
         elif not user_pwd:
             print("Warning: no password stored for user; API upload may fail")
@@ -1084,8 +1097,10 @@ def main():
                                 "calibrationFunction": f"{args.cps_to_usvh_func}"
                             }
                             
-                            # Add username if provided
-                            if username:
+                            # Add userId (prefer user_id over username)
+                            if user_id:
+                                data["userId"] = user_id
+                            elif username:
                                 data["userId"] = username
                             # Add password if provided
                             if user_pwd:
@@ -1166,10 +1181,10 @@ def main():
                         "description": f"Rium GM fixed beacon measurement",
                         "calibrationFunction": f"{args.cps_to_usvh_func}"
                     }
-                    if username:
-                        data["userId"] = username
                     if user_id:
                         data["userId"] = user_id
+                    elif username:
+                        data["userId"] = username
                     if user_pwd:
                         data["userPwd"] = user_pwd
                     if all_tags:
