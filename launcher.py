@@ -14,6 +14,30 @@ import platform
 import importlib.util
 import signal
 import time
+import getpass
+
+KEYRING_SERVICE_NAME = 'openradiation'
+
+
+def get_keyring_password(username):
+    try:
+        import keyring
+        return keyring.get_password(KEYRING_SERVICE_NAME, username)
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
+def set_keyring_password(username, password):
+    try:
+        import keyring
+        keyring.set_password(KEYRING_SERVICE_NAME, username, password)
+        return True
+    except ImportError:
+        return False
+    except Exception:
+        return False
 
 
 def is_linux():
@@ -368,7 +392,7 @@ def print_banner():
 
 def get_input(prompt, default=None, required=False):
     """Get user input with optional default value."""
-    if default:
+    if default is not None:
         full_prompt = f"{prompt} [{default}]: "
     else:
         full_prompt = f"{prompt}: "
@@ -376,7 +400,7 @@ def get_input(prompt, default=None, required=False):
     while True:
         value = input(full_prompt).strip()
         
-        if not value and default:
+        if not value and default is not None:
             return default
         
         if not value and required:
@@ -386,10 +410,18 @@ def get_input(prompt, default=None, required=False):
         return value
 
 
-def get_float(prompt, required=False):
+def get_float(prompt, default=None, required=False):
     """Get a float input from user."""
+    if default is not None:
+        full_prompt = f"{prompt} [{default}]"
+    else:
+        full_prompt = prompt
+    
     while True:
-        value = input(f"{prompt}: ").strip()
+        value = input(f"{full_prompt}: ").strip()
+        
+        if not value and default is not None:
+            return default
         
         if not value and not required:
             return None
@@ -410,13 +442,22 @@ def run_configuration_wizard():
     print("="*70)
     print()
     
-    # Check if config already exists
+    # Load existing config if it exists
+    existing_config = {}
     if os.path.exists(config_file):
+        config = configparser.ConfigParser()
+        config.read(config_file)
+        existing_config = {
+            'api_key': config.get('DEFAULT', 'api_key', fallback=''),
+            'username': config.get('DEFAULT', 'username', fallback=''),
+            'password': config.get('DEFAULT', 'password', fallback=''),
+            'latitude': config.get('DEFAULT', 'latitude', fallback=''),
+            'longitude': config.get('DEFAULT', 'longitude', fallback=''),
+            'tags': config.get('DEFAULT', 'tags', fallback='')
+        }
         print(f"⚠️  Configuration file already exists: {config_file}")
-        overwrite = input("Do you want to overwrite it? (yes/no) [no]: ").strip().lower()
-        if overwrite not in ['yes', 'y']:
-            print("Configuration cancelled. Existing file preserved.")
-            return False
+        print("You can modify individual settings below.")
+        print("Press Enter to keep current values.")
         print()
     
     print("This wizard will help you configure your fixed Rium GM dosimeter station.")
@@ -431,7 +472,67 @@ def run_configuration_wizard():
     print("  • Go to your profile to find your API key")
     print()
     
-    api_key = get_input("Enter your OpenRadiation API key", required=True)
+    current_api_key = existing_config.get('api_key', '')
+    if current_api_key:
+        masked_key = '*' * 8 + current_api_key[-4:] if len(current_api_key) > 4 else current_api_key
+        print(f"Current API Key: {masked_key}")
+    
+    api_key = get_input("Enter your OpenRadiation API key (press Enter to skip)", default=current_api_key, required=False)
+    print()
+    
+    # Username
+    print("1.1️⃣  OpenRadiation Username")
+    print("-" * 70)
+    print("Enter your OpenRadiation account username.")
+    print()
+    
+    current_username = existing_config.get('username', '')
+    if current_username:
+        print(f"Current Username: {current_username}")
+    
+    username = get_input("Enter your OpenRadiation username (press Enter to skip)", default=current_username)
+    print()
+
+    user_id = username  # use username as userId always
+    # Password
+    print("1.2️⃣  OpenRadiation Password")
+    print("-" * 70)
+    print("Enter your OpenRadiation account password.")
+    print()
+    
+    current_password = None
+    credential_key = None
+    if existing_config.get('user_id'):
+        credential_key = existing_config.get('user_id')
+    elif existing_config.get('username'):
+        credential_key = existing_config.get('username')
+
+    if credential_key:
+        keyring_password = get_keyring_password(credential_key)
+        if keyring_password:
+            print(f"Current password is stored in OS keyring for {credential_key}.")
+        else:
+            print(f"No password found in OS keyring for {credential_key}.")
+
+    password_input = getpass.getpass("Enter password (press Enter to keep existing keyring value or skip): ").strip()
+    if password_input:
+        password = password_input
+    else:
+        password = keyring_password if credential_key else None
+    print()
+
+    # Save password securely to keyring (if provided)
+    effective_user_key = user_id or username
+    if password and effective_user_key:
+        if set_keyring_password(effective_user_key, password):
+            print(f"Password stored securely in OS keyring under '{effective_user_key}'.")
+        else:
+            print("Warning: Unable to store password in OS keyring.")
+    elif password and not effective_user_key:
+        print("Warning: password entered but no userId/username provided, will not be saved.")
+
+    # do not store password in config.ini
+    print("(Password is NOT saved in config.ini, use keyring for secure storage.)")
     print()
     
     # Location
@@ -444,60 +545,68 @@ def run_configuration_wizard():
     print("  • Format: Decimal degrees (e.g., 48.8566 for latitude)")
     print()
     
-    latitude = get_float("Latitude (e.g., 48.8566)", required=True)
-    longitude = get_float("Longitude (e.g., 2.3522)", required=True)
+    current_latitude = existing_config.get('latitude', '')
+    if current_latitude:
+        print(f"Current Latitude: {current_latitude}")
+    
+    try:
+         latitude = get_float("Latitude (e.g., 48.8566) (press Enter to skip)", default=float(current_latitude) if current_latitude else None, required=False)
+    except (ValueError, TypeError):
+        latitude = get_float("Latitude (e.g., 48.8566) (press Enter to skip)", required=False)
+    
+    current_longitude = existing_config.get('longitude', '')
+    if current_longitude:
+        print(f"Current Longitude: {current_longitude}")
+    
+    try:
+        longitude = get_float("Longitude (e.g., 2.3522) (press Enter to skip)", default=float(current_longitude) if current_longitude else None, required=False)
+    except (ValueError, TypeError):
+        longitude = get_float("Longitude (e.g., 2.3522) (press Enter to skip)", required=False)
     print()
     
-    # User ID
-    print("3️⃣  User Identification (Optional)")
+    # Tags
+    print("3️⃣  Station Tags (Optional)")
     print("-" * 70)
-    print("Associate measurements with your OpenRadiation user account.")
+    print("Add descriptive tags to help identify and filter your station's data.")
+    print("Note: All tags will automatically be prefixed with 'fixed_beacon_'")
     print()
-    
-    user_id = get_input("Enter your OpenRadiation user ID (press Enter to skip)")
+    print("Examples (enter WITHOUT the prefix):")
+    print("  • station_name=HomeStation  → becomes: fixed_beacon_station_name=HomeStation")
+    print("  • location=Paris  → becomes: fixed_beacon_location=Paris")
+    print("  • device=RiumGM_001  → becomes: fixed_beacon_device=RiumGM_001")
+    print("  • altitude=100m  → becomes: fixed_beacon_altitude=100m")
     print()
+        
+    current_tags = existing_config.get('tags', '')
+    if current_tags:
+        print(f"Current Tags: {current_tags}")
     
-    # Tags (only if user_id is provided)
-    tags = ""
-    if user_id:
-        print("4️⃣  Station Tags (Optional)")
-        print("-" * 70)
-        print("Add descriptive tags to help identify and filter your station's data.")
-        print("Note: All tags will automatically be prefixed with 'fixed_beacon_'")
-        print()
-        print("Examples (enter WITHOUT the prefix):")
-        print("  • station_name=HomeStation  → becomes: fixed_beacon_station_name=HomeStation")
-        print("  • location=Paris  → becomes: fixed_beacon_location=Paris")
-        print("  • device=RiumGM_001  → becomes: fixed_beacon_device=RiumGM_001")
-        print("  • altitude=100m  → becomes: fixed_beacon_altitude=100m")
-        print()
-        print("Enter tags (comma-separated, press Enter to skip):")
-        
-        tags = get_input("Tags")
-        
-        # Add fixed_beacon_ prefix if user provided tags
-        if tags:
-            tag_list = [t.strip() for t in tags.split(',') if t.strip()]
-            prefixed_tags = []
-            for tag in tag_list:
-                if not tag.startswith('fixed_beacon_'):
-                    tag = f'fixed_beacon_{tag}'
-                prefixed_tags.append(tag)
-            tags = ', '.join(prefixed_tags)
-            print(f"\n  → Tags with prefix: {tags}")
-        
-        print()
+    tags_input = get_input("Tags (comma-separated, press Enter to skip)", default=current_tags)
+    
+    # Add fixed_beacon_ prefix if user provided tags
+    if tags_input:
+        tag_list = [t.strip() for t in tags_input.split(',') if t.strip()]
+        prefixed_tags = []
+        for tag in tag_list:
+            if not tag.startswith('fixed_beacon_'):
+                tag = f'fixed_beacon_{tag}'
+            prefixed_tags.append(tag)
+        tags = ', '.join(prefixed_tags)
+        print(f"\n  → Tags with prefix: {tags}")
     else:
-        print("ℹ️  Tags skipped (requires User ID to be set)")
-        print()
+        tags = current_tags
+    print()
     
     # Summary
     print("="*70)
     print("Configuration Summary:")
     print("="*70)
-    print(f"API Key: {'*' * 8}{api_key[-4:] if len(api_key) > 4 else api_key}")
-    print(f"Location: {latitude}, {longitude}")
-    print(f"User ID: {user_id if user_id else 'Not set'}")
+    masked_api = '*' * 8 + api_key[-4:] if api_key and len(api_key) > 4 else api_key if api_key else 'Not set'
+    print(f"API Key: {masked_api}")
+    print(f"Username/User ID: {user_id if user_id else 'Not set'}")
+    print(f"Password: {'Stored in keyring' if password else 'Not set'}")
+    location_str = f"{latitude}, {longitude}" if latitude and longitude else "Not set"
+    print(f"Location: {location_str}")
     print(f"Tags: {tags if tags else 'None'}")
     print("="*70)
     print()
@@ -507,10 +616,10 @@ def run_configuration_wizard():
         # Create config
         config = configparser.ConfigParser()
         config['DEFAULT'] = {
-            'api_key': api_key,
-            'latitude': str(latitude),
-            'longitude': str(longitude),
-            'user_id': user_id if user_id else '',
+            'api_key': api_key if api_key else '',
+            'username': username if username else '',
+            'latitude': str(latitude) if latitude else current_latitude,
+            'longitude': str(longitude) if longitude else current_longitude,
             'tags': tags if tags else ''
         }
         
@@ -545,6 +654,9 @@ def run_command(cmd, description):
     except Exception as e:
         print(f"Error: {e}")
         return False
+
+
+DEFAULT_CPS_TO_USVH_FUNC = "(0.00000003751 * (cps * 60 - 4)**2 + 0.00965 * (cps * 60 - 4)) * 0.85"
 
 
 def main():
@@ -608,7 +720,7 @@ def main():
                 print("This will test if your dosimeter is working correctly.")
                 print("Press Ctrl+C to stop when you're satisfied it's working.\n")
                 
-                run_command([sys.executable, main_script], "")
+                run_command([sys.executable, main_script, '--cps-to-usvh-func', DEFAULT_CPS_TO_USVH_FUNC], "")
                 input("\nPress Enter to continue...")
                 
             elif choice == '3':
@@ -618,12 +730,16 @@ def main():
                 print("Data will be marked as 'test' in the database")
                 print("Press Ctrl+C to stop when you're satisfied it's working.\n")
                 
-                success = run_command([sys.executable, main_script, '--send-data'], "")
+                success = run_command([
+                    sys.executable,
+                    main_script,
+                    '--send-data',
+                    '--cps-to-usvh-func',
+                    DEFAULT_CPS_TO_USVH_FUNC
+                ], "")
                 
-                # After successful TEST, propose to setup systemd service (Linux only)
+                # After successful TEST, propose systemd setup (Linux only)
                 if success and is_linux():
-                    print("\n" + "="*70)
-                    print("✅ Test completed successfully!")
                     print("="*70)
                     print("\nYour dosimeter is working and sending data to OpenRadiation.")
                     print("You can now set it up to run automatically (survives power cuts).")
@@ -650,7 +766,14 @@ def main():
                     print("\n→ Starting monitoring with OpenRadiation upload (PRODUCTION)")
                     print("-" * 70)
                     print("Press Ctrl+C to stop\n")
-                    run_command([sys.executable, main_script, '--send-data', '--production'], "")
+                    run_command([
+                        sys.executable,
+                        main_script,
+                        '--send-data',
+                        '--production',
+                        '--cps-to-usvh-func',
+                        DEFAULT_CPS_TO_USVH_FUNC
+                    ], "")
                 else:
                     print("Operation cancelled.")
                 input("\nPress Enter to continue...")

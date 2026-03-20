@@ -23,6 +23,7 @@ import argparse
 import configparser
 import csv
 import glob
+import getpass
 import json
 import os
 import re
@@ -30,14 +31,18 @@ import signal
 import sys
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 
 SAVE_RATE = 900  # [s] - Period for aggregating and sending measurements (15 minutes minimum)
 MAX_QUEUE_SIZE = 100  # Maximum number of failed measurements to keep in queue
 MAX_QUEUE_AGE_DAYS = 7  # Maximum age of queued measurements in days
 MAX_LOCAL_DOSES = 100  # Maximum number of dose measurements to keep in local CSV
+
+# Service name for storing passwords in system keyring
+KEYRING_SERVICE_NAME = "openradiation"
 
 # Global flag for graceful shutdown
 shutdown_requested = False
@@ -71,12 +76,12 @@ def create_pid_file():
             # Check if process is actually running
             try:
                 os.kill(old_pid, 0)  # Signal 0 just checks if process exists
-                print(f"⚠️  Another instance is already running (PID: {old_pid})")
+                print(f"Another instance is already running (PID: {old_pid})")
                 print(f"   To stop it, run: kill {old_pid}")
                 return False
             except OSError:
                 # Process doesn't exist, remove stale PID file
-                print(f"→ Removing stale PID file (PID {old_pid} not running)")
+                print(f"Removing stale PID file (PID {old_pid} not running)")
                 os.remove(pid_file)
         except (ValueError, IOError):
             # Corrupted PID file, remove it
@@ -88,7 +93,7 @@ def create_pid_file():
             f.write(str(os.getpid()))
         return True
     except IOError as e:
-        print(f"⚠️  Warning: Could not create PID file: {e}")
+        print(f"Warning: Could not create PID file: {e}")
         return True  # Continue anyway
 
 
@@ -116,9 +121,14 @@ def check_dependencies():
     except ImportError:
         missing.append('requests')
     
+    try:
+        import keyring
+    except ImportError:
+        missing.append('keyring')
+    
     if missing:
         print("="*60)
-        print("⚠️  Missing required dependencies:")
+        print("Missing required dependencies:")
         for dep in missing:
             print(f"  - {dep}")
         print("="*60)
@@ -141,11 +151,11 @@ def check_dependencies():
                         text=True
                     )
                     if result.returncode == 0:
-                        print("✅ Dependencies installed successfully!")
+                        print("Dependencies installed successfully!")
                         print("Please run the script again.")
                         sys.exit(0)
                     else:
-                        print(f"❌ Installation failed: {result.stderr}")
+                        print(f"Installation failed: {result.stderr}")
                         sys.exit(1)
             except KeyboardInterrupt:
                 print("\nInstallation cancelled.")
@@ -204,18 +214,18 @@ def validate_dosimeter_connection(port, baud, timeout=5):
                             parsed = parse_rium_frame(frame)
                             if parsed:
                                 ser.close()
-                                print("✅ Rium GM detected!")
+                                print("Rium GM detected!")
                                 return True
         
         ser.close()
-        print("❌ No valid Rium frames detected")
+        print("No valid Rium frames detected")
         return False
         
     except serial.SerialException as e:
-        print(f"❌ Error: {e}")
+        print(f"Error: {e}")
         return False
     except Exception as e:
-        print(f"❌ Unexpected error: {e}")
+        print(f"Unexpected error: {e}")
         return False
 
 
@@ -230,13 +240,14 @@ def load_config(config_path='config.ini'):
     
     if not os.path.exists(config_path):
         print("="*60)
-        print("⚠️  Configuration file not found!")
+        print("Configuration file not found!")
         print("="*60)
         print(f"Expected location: {config_path}")
         print("\nCreating a template config.ini file...")
         
         config['DEFAULT'] = {
             'api_key': '',
+            'username': '',
             'latitude': '',
             'longitude': '',
             'user_id': '',
@@ -249,6 +260,10 @@ def load_config(config_path='config.ini'):
             f.write("[DEFAULT]\n")
             f.write("# Get your API key from: https://www.openradiation.org/\n")
             f.write("api_key = \n\n")
+            f.write("# OpenRadiation account credentials\n")
+            f.write("# Use either user_id or username plus password in OS keyring (not stored here).\n")
+            f.write("username = \n")
+            f.write("# password = (not stored in config.ini; use keyring command or setup wizard)\n\n")
             f.write("# Fixed station GPS coordinates (decimal degrees)\n")
             f.write("# Example: 48.8566 for Paris\n")
             f.write("latitude = \n")
@@ -259,7 +274,7 @@ def load_config(config_path='config.ini'):
             f.write("# Example: station=Home, device=RiumGM_001\n")
             f.write("tags = \n")
         
-        print(f"✅ Template created: {config_path}")
+        print(f"Template created: {config_path}")
         print("="*60)
         print("\nConfiguration needed! You have 2 options:")
         print("  1. Run the setup wizard:")
@@ -290,6 +305,33 @@ def load_config(config_path='config.ini'):
     return config['DEFAULT']
 
 
+def get_keyring_password(username: str) -> Optional[str]:
+    """Retrieve a stored password from the OS keyring."""
+    try:
+        import keyring
+    except ImportError:
+        return None
+
+    try:
+        return keyring.get_password(KEYRING_SERVICE_NAME, username)
+    except Exception:
+        return None
+
+
+def set_keyring_password(username: str, password: str) -> bool:
+    """Store a password in the OS keyring."""
+    try:
+        import keyring
+    except ImportError:
+        return False
+
+    try:
+        keyring.set_password(KEYRING_SERVICE_NAME, username, password)
+        return True
+    except Exception:
+        return False
+
+
 def open_serial(port, baud, timeout=None):
     # Use blocking reads by default (timeout=None) so we can read single bytes
     # with minimal latency. This gives high time-sensitivity for detecting hits.
@@ -298,6 +340,22 @@ def open_serial(port, baud, timeout=None):
 
 def hexdump(b: bytes) -> str:
     return ' '.join(f'{x:02x}' for x in b)
+
+
+def convert_cps_to_usvh(cps, factor, formula=None):
+    """Convert CPM (counts per second) to µSv/h using either a factor or formula."""
+    if formula:
+        # Accept '^' as power for convenience, convert to Python '**'
+        safe_formula = formula.replace('^', '**')
+        safe_locals = {'cps': cps, 'abs': abs, 'max': max, 'min': min, 'pow': pow}
+        try:
+            value = eval(safe_formula, {'__builtins__': {}}, safe_locals)
+            return float(value)
+        except Exception as e:
+            print(f"Warning: invalid cps-to-usvh formula '{formula}': {e}")
+            print(f"Falling back to simple factor conversion: cps * {factor}")
+            return cps * factor
+    return cps * factor
 
 
 def get_queue_file():
@@ -374,7 +432,7 @@ def save_local_dose(timestamp, value, hits_number, duration, device_id='', temp=
         # Add new measurement
         new_dose = {
             'timestamp': timestamp,
-            'iso_time': datetime.utcfromtimestamp(float(timestamp)).isoformat(),
+            'iso_time': datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat(),
             'dose_rate_usvh': f"{value:.4f}",
             'hits_number': str(hits_number),
             'duration_s': f"{duration:.1f}",
@@ -419,7 +477,7 @@ def add_to_queue(api_key, data, production=False):
         queue = queue[-MAX_QUEUE_SIZE:]
     
     save_queue(queue)
-    print(f"  → Added to queue ({len(queue)} pending measurements)")
+    print(f"  Added to queue ({len(queue)} pending measurements)")
 
 
 def process_queue():
@@ -428,7 +486,7 @@ def process_queue():
     if not queue:
         return
     
-    print(f"\n→ Processing queue: {len(queue)} pending measurements...")
+    print(f"\nProcessing queue: {len(queue)} pending measurements...")
     
     successful = []
     failed = []
@@ -444,10 +502,10 @@ def process_queue():
             max_retries=1  # Single attempt for queued items
         ):
             successful.append(item)
-            print("✓")
+            print("OK")
         else:
             failed.append(item)
-            print("✗")
+            print("FAILED")
             # Don't spam if multiple failures
             if len(failed) >= 3:
                 print(f"  (Stopping after 3 consecutive failures)")
@@ -459,7 +517,7 @@ def process_queue():
     save_queue(failed)
     
     if successful:
-        print(f"✓ Successfully sent {len(successful)} queued measurements")
+        print(f"Successfully sent {len(successful)} queued measurements")
     if failed:
         print(f"  ({len(failed)} measurements still in queue)")
 
@@ -472,7 +530,7 @@ def parse_rium_frame(frame: bytes) -> dict:
     - A (4 bytes): Device ID (32 bits)
     - B (2 bytes): Count (16 bits)
     - C (2 bytes): Delay in deciseconds (16 bits)
-    - D (2 bytes): Temperature in deciseconds (16 bits)
+    - D (2 bytes): Temperature in deciseconds (16 bits) 
     
     Returns dict with parsed data or None if invalid frame.
     """
@@ -497,19 +555,25 @@ def parse_rium_frame(frame: bytes) -> dict:
     }
 
 
-def post_measurement(api_key, data, production=False, max_retries=3):
+def post_measurement(api_key, data, production, max_retries=3):
     """
     Post measurement data to OpenRadiation API with retry logic.
     Returns True if successful, False otherwise.
     """
+    print("\nPosting measurement to OpenRadiation API...")
+    print("production:", production )
+    print
+
     url = "https://submit.openradiation.net/measurements"
     payload = {
         "apiKey": api_key,
         "data": data 
     }
     if not production:
+        print("Sending in TEST mode (reportContext=test)")
         payload["data"]["reportContext"] = "test"
     else:
+        print("Sending in PRODUCTION mode (reportContext=routine)")
         payload["data"]["reportContext"] = "routine"
     
     headers = {
@@ -518,7 +582,8 @@ def post_measurement(api_key, data, production=False, max_retries=3):
     
     # Show sent data for debugging
     print("Prepared measurement data for API:")
-    print(json.dumps(payload, indent=2))
+    # print json but not password
+    print(json.dumps({**payload, "data": {**payload["data"], "userPwd": "****" if "userPwd" in payload["data"] else None}}, indent=2))
     print(f"API endpoint: {url}")
     
     # Retry loop with exponential backoff
@@ -526,53 +591,53 @@ def post_measurement(api_key, data, production=False, max_retries=3):
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=30)
             if response.status_code == 201:
-                print("✓ Measurement posted successfully.")
+                print("Measurement posted successfully.")
                 return True
             else:
-                print(f"✗ Failed to post measurement: {response.status_code}")
+                print(f"Failed to post measurement: {response.status_code}")
                 print(f"  Response: {response.text}")
                 
                 # If it's a client error (4xx), don't retry
                 if 400 <= response.status_code < 500:
-                    print("  → Client error, not retrying.")
+                    print("  Client error, not retrying.")
                     return False
                     
                 # Server error (5xx), retry
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
-                    print(f"  → Retrying in {wait_time}s... (attempt {attempt + 2}/{max_retries})")
+                    print(f"  Retrying in {wait_time}s... (attempt {attempt + 2}/{max_retries})")
                     time.sleep(wait_time)
                     
         except requests.exceptions.Timeout:
-            print(f"✗ Error: Request timeout after 30s (attempt {attempt + 1}/{max_retries})")
+            print(f"Error: Request timeout after 30s (attempt {attempt + 1}/{max_retries})")
             if attempt < max_retries - 1:
                 wait_time = 2 ** attempt
-                print(f"  → Retrying in {wait_time}s...")
+                print(f"  Retrying in {wait_time}s...")
                 time.sleep(wait_time)
                 
         except requests.exceptions.ConnectionError as e:
-            print(f"✗ Error: No internet connection (attempt {attempt + 1}/{max_retries})")
+            print(f"Error: No internet connection (attempt {attempt + 1}/{max_retries})")
             if attempt < max_retries - 1:
                 wait_time = 5 * (attempt + 1)  # 5s, 10s, 15s
-                print(f"  → Will retry in {wait_time}s...")
-                print(f"  → (Measurements continue to be logged locally)")
+                print(f"  Will retry in {wait_time}s...")
+                print(f"  (Measurements continue to be logged locally)")
                 time.sleep(wait_time)
                 
         except Exception as e:
-            print(f"✗ Error posting measurement: {e} (attempt {attempt + 1}/{max_retries})")
+            print(f"Error posting measurement: {e} (attempt {attempt + 1}/{max_retries})")
             if attempt < max_retries - 1:
                 wait_time = 2 ** attempt
-                print(f"  → Retrying in {wait_time}s...")
+                print(f"  Retrying in {wait_time}s...")
                 time.sleep(wait_time)
     
     # All retries failed
-    print("✗ Failed to post measurement after all retries.")
-    print("  → Data has been saved locally in CSV file.")
+    print("Failed to post measurement after all retries.")
+    print("  Data has been saved locally in CSV file.")
     
     # Add to queue for later retry (only if max_retries > 1, to avoid queuing during queue processing)
     if max_retries > 1:
         add_to_queue(api_key, data, production)
-        print("  → Will retry automatically when connection is restored.")
+        print("  Will retry automatically when connection is restored.")
     
     return False
 
@@ -604,10 +669,37 @@ def main():
 
     # Sensitivity of Rium GM : Sensitivity 2.6 cps/µSv/h according to https://www.riummanufacturing.com/products/gm-tubes/ and user reports. This means 1 CPS corresponds to approximately 0.385 µSv/h, so the conversion factor is 1/2.6.
     parser.add_argument('--cps-to-usvh', type=float, default=1/2.6, help='Conversion factor from CPS to µSv/h (default: 1/2.6)')
+    parser.add_argument('--cps-to-usvh-func', default=None, help='Conversion formula of cps to µSv/h, e.g. "(0.00000003751 * (cps * 60 - 4)**2 + 0.00965 * (cps * 60 - 4)) * 0.85"')
     parser.add_argument('--production', action='store_true', help='Set reportContext to routine (real data) instead of test. Use with caution!')
     parser.add_argument('--tag', action='append', default=[], help='Add tags to measurements (can be used multiple times, e.g. --tag location=Paris --tag device=GM1)')
+    parser.add_argument('--set-password', help='Set password for a user ID in the OS keyring (e.g. --set-password myuser)')
+    parser.add_argument('--clear-password', help='Clear stored password for a user ID from the OS keyring (e.g. --clear-password myuser)')
     
     args = parser.parse_args()
+    print("Production : ", args.production)
+    print("send_data : ", args.send_data)
+    # Handle password management commands first (before other processing)
+    if args.set_password:
+        if not sys.stdin.isatty():
+            print("Error: --set-password requires interactive terminal")
+            sys.exit(1)
+        password = getpass.getpass(f"Enter password for user '{args.set_password}': ")
+        if set_keyring_password(args.set_password, password):
+            print(f"Password stored securely for user '{args.set_password}'")
+        else:
+            print("Failed to store password")
+        sys.exit(0)
+    
+    if args.clear_password:
+        try:
+            import keyring
+            keyring.delete_password(KEYRING_SERVICE_NAME, args.clear_password)
+            print(f"Password cleared for user '{args.clear_password}'")
+        except ImportError:
+            print("Error: keyring not available")
+        except Exception as e:
+            print(f"Error clearing password: {e}")
+        sys.exit(0)
 
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
@@ -664,6 +756,33 @@ def main():
             api_key = None
     
     user_id = args.user_id if args.user_id else (config.get('user_id') if config else None)
+    username = config.get('username') if config else None
+
+    # Always use OpenRadiation username as userId, unless explicit user_id override given
+    if not user_id and username:
+        user_id = username
+
+    user_pwd = config.get('password') if config else None
+
+    credential_key = user_id or username
+
+    # If plain-text password is found in config, save it to keyring and use it
+    if user_pwd and credential_key:
+        if set_keyring_password(credential_key, user_pwd):
+            print(f"Password migrated to OS keyring for '{credential_key}'.")
+        user_pwd = user_pwd  # still use current value for this session
+
+    # If we are going to send data and no password present, try keyring/prompt
+    if args.send_data and credential_key and not user_pwd:
+        user_pwd = get_keyring_password(credential_key)
+        if not user_pwd and sys.stdin.isatty():
+            # Prompt for password once, store it securely for future runs
+            user_pwd = getpass.getpass(f"Password for user '{credential_key}': ")
+            if user_pwd:
+                if not set_keyring_password(credential_key, user_pwd):
+                    print("Warning: could not store password in keyring")
+        elif not user_pwd:
+            print("Warning: no password stored for user; API upload may fail")
     
     # Parse tags from config file (comma-separated) and merge with CLI tags
     # Force "fixed_beacon_" prefix on all tags
@@ -688,6 +807,8 @@ def main():
     if config:
         print(f"Configuration file: {args.config}")
         print(f"  API Key: {'*' * 8 + api_key[-4:] if api_key and len(api_key) > 4 else 'NOT SET'}")
+        print(f"  Username: {username if username else 'NOT SET'}")
+        print(f"  Password: {'*' * len(user_pwd) if user_pwd else 'NOT SET'}")
         print(f"  Location: {latitude}, {longitude}" if latitude and longitude else "  Location: NOT SET")
         print(f"  User ID: {user_id if user_id else 'NOT SET'}")
         print(f"  Tags: {', '.join(all_tags) if all_tags else 'NONE'}")
@@ -737,7 +858,7 @@ def main():
     if not port:
         if not candidates:
             print('='*60)
-            print('❌ ERROR: No serial ports detected!')
+            print('ERROR: No serial ports detected!')
             print('='*60)
             print('Please check:')
             print('  1. Rium GM dosimeter is connected via USB')
@@ -761,7 +882,7 @@ def main():
         
         if not port:
             print("="*60)
-            print("⚠️  Could not auto-detect Rium GM dosimeter")
+            print("Could not auto-detect Rium GM dosimeter")
             print("="*60)
             print("Detected serial ports:")
             for p in candidates:
@@ -805,15 +926,15 @@ def main():
     for attempt in range(max_retries):
         try:
             ser = open_serial(port, args.baud)
-            print(f'✅ Connected successfully!')
+            print(f'Connected successfully!')
             break
         except serial.SerialException as e:
             if attempt < max_retries - 1:
-                print(f'⚠️  Connection failed (attempt {attempt + 1}/{max_retries}): {e}')
+                print(f'Connection failed (attempt {attempt + 1}/{max_retries}): {e}')
                 print(f'   Retrying in {retry_delay} seconds...')
                 time.sleep(retry_delay)
             else:
-                print(f'❌ Failed to open serial port after {max_retries} attempts: {e}')
+                print(f'Failed to open serial port after {max_retries} attempts: {e}')
                 print('\nTroubleshooting:')
                 print('  • Check the device is connected')
                 print('  • Verify you have permissions (Linux: dialout group)')
@@ -821,11 +942,11 @@ def main():
                 print('  • Check if another program is using the port')
                 sys.exit(2)
         except Exception as e:
-            print(f'❌ Unexpected error opening port: {e}')
+            print(f'Unexpected error opening port: {e}')
             sys.exit(2)
     
     if ser is None:
-        print('❌ Could not establish connection')
+        print('Could not establish connection')
         sys.exit(2)
 
     # Ensure CSV header exists (add detailed columns)
@@ -847,6 +968,7 @@ def main():
         period_hit_times = []  # hits in current period
         period_events = []  # detailed events in current period
         time_last_save = time.time()  # Initialize to now
+        device_info_shown = False  # Track if device info has been shown
         
         while not shutdown_requested:
             try:
@@ -859,7 +981,7 @@ def main():
                     continue
 
                 ts = time.time()
-                iso = datetime.utcfromtimestamp(ts).isoformat() 
+                iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() 
                 
                 # Append to buffer
                 buffer.append(b[0])
@@ -869,8 +991,8 @@ def main():
                 if len(buffer) > 512:
                     del buffer[0:len(buffer) - 512]
 
-                # Immediate Hit detection: check last 12-byte window
-                hit = False
+                # Immediate frame detection: check last 12-byte window
+                frame = False
                 if len(buffer) >= 12:
                     # Look for C1 00 header in the last bytes
                     # Check multiple possible positions in case of misalignment
@@ -879,13 +1001,13 @@ def main():
                             frame = bytes(buffer[i:i+12])
                             # Verify it's a valid frame
                             if parse_rium_frame(frame):
-                                hit = True
+                                frame = True
                                 # Adjust buffer to point to this frame
                                 del buffer[0:i]
                                 break         
 
-                # If a Hit was detected, log it immediately with the 12-byte frame
-                if hit:
+                # If a frame was detected, log it immediately with the 12-byte frame
+                if frame:
                     frame = bytes(buffer[-12:])
                     raw_hex = hexdump(frame)
                     
@@ -893,8 +1015,10 @@ def main():
                     parsed = parse_rium_frame(frame)
                     
                     if parsed:
-                        print(f'{iso}  HIT detected  hex={raw_hex}')
-                        print(f'  Device: {parsed["device"]}, Count: {parsed["count"]}, Delay: {parsed["delay"]:.1f}s, Temp: {parsed["temp"]:.1f}°C')
+                        if not device_info_shown:
+                            print(f'Device: {parsed["device"]}')
+                            device_info_shown = True
+                        print(f'- {iso}  Count: {parsed["count"]}, Temp: {parsed["temp"]:.1f}C')
                         
                         # Write to CSV with parsed data
                         writer.writerow([
@@ -917,8 +1041,13 @@ def main():
                         # Calculate hit rate for current period
                         if len(period_hit_times) > 1:
                             elapsed_hours = (ts - period_hit_times[0]) / 3600  # hours
-                            hit_rate = len(period_hit_times) / elapsed_hours if elapsed_hours > 0 else 0
+                            # number of hits is the number of count in every period event that is greater than 0
+                            number_of_hits = sum(e['count'] for e in period_events)
+                            hit_rate = number_of_hits / elapsed_hours if elapsed_hours > 0 else 0
+                            print(f'  Elapsed time: {elapsed_hours:.4f} hours')
+                            print(f'  Total hits in period: {number_of_hits}')
                             print(f'  Period hit rate: {hit_rate:.2f} hits/hour')
+                            
                     else:
                         # Frame detected but parsing failed
                         print(f'{iso}  Invalid frame detected  hex={raw_hex}')
@@ -931,18 +1060,18 @@ def main():
                 # Periodic save to .dat and .json files
                 if ts - time_last_save > SAVE_RATE:
                     print(f"\n{'='*60}")
-                    print(f"Period summary [{datetime.utcfromtimestamp(time_last_save).strftime('%H:%M:%S')} - {datetime.utcfromtimestamp(ts).strftime('%H:%M:%S')}]")
+                    print(f"Period summary [{datetime.fromtimestamp(time_last_save, tz=timezone.utc).strftime('%H:%M:%S')} - {datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%H:%M:%S')}]")
                     
                     # Calculate dose rate
-                    hits_number = len(period_hit_times)
+                    hits_number = sum(e['count'] for e in period_events)
                     if hits_number > 0:
                         start_time = period_hit_times[0]
                         end_time = period_hit_times[-1]
                         duration = end_time - start_time if end_time > start_time else SAVE_RATE
                         cps = hits_number / duration
-                        value = cps * args.cps_to_usvh
+                        value = convert_cps_to_usvh(cps, args.cps_to_usvh, args.cps_to_usvh_func)
                         print(f'  Hits: {hits_number} in {duration:.1f}s')
-                        print(f'  CPS: {cps:.3f} → Dose rate: {value:.4f} µSv/h')
+                        print(f'  CPS: {cps:.3f} -> Dose rate: {value:.4f} uSv/h')
                         
                         # Get device info from last event
                         device_id = period_events[-1]['device'] if period_events else 'unknown'
@@ -951,7 +1080,7 @@ def main():
                         
                         # Save to local CSV (rolling 100 measurements)
                         save_local_dose(start_time, value, hits_number, duration, device_id, avg_temp)
-                        print(f'  ✓ Saved to local dose history (last {MAX_LOCAL_DOSES} measurements)')
+                        print(f'  Saved to local dose history (last {MAX_LOCAL_DOSES} measurements)')
 
                         # Send to OpenRadiation API if enabled
                         if args.send_data:
@@ -961,14 +1090,21 @@ def main():
                                 "latitude": float(latitude),
                                 "longitude": float(longitude),
                                 "value": float(round(value, 4)),
-                                "startTime": datetime.utcfromtimestamp(start_time).isoformat(),
+                                "startTime": datetime.fromtimestamp(start_time, tz=timezone.utc).isoformat(),
+                                "endTime": datetime.fromtimestamp(end_time, tz=timezone.utc).isoformat(),
                                 "hitsNumber": hits_number,
-                                "hitsPeriod": int(duration)
+                                "description": f"Rium GM fixed beacon measurement",
+                                "calibrationFunction": f"{args.cps_to_usvh_func}"
                             }
                             
-                            # Add user ID if provided
+                            # Add userId (prefer user_id over username)
                             if user_id:
                                 data["userId"] = user_id
+                            elif username:
+                                data["userId"] = username
+                            # Add password if provided
+                            if user_pwd:
+                                data["userPwd"] = user_pwd
                             # Add tags if provided
                             if all_tags:
                                 data["tags"] = all_tags
@@ -980,7 +1116,7 @@ def main():
                             if success:
                                 queue = load_queue()
                                 if queue:
-                                    print(f"\n→ Connection restored! Processing {len(queue)} queued measurements...")
+                                    print(f"\nConnection restored! Processing {len(queue)} queued measurements...")
                                     process_queue()
                     else:
                         print("  No hits detected in this period.")
@@ -1013,13 +1149,13 @@ def main():
             
             # Save final period if there's data
             if period_hit_times:
-                print("\n→ Saving final measurement period...")
+                print("\nSaving final measurement period...")
                 hits_number = len(period_hit_times)
                 start_time = period_hit_times[0]
                 end_time = period_hit_times[-1]
                 duration = end_time - start_time if end_time > start_time else 1
                 cps = hits_number / duration
-                value = cps * args.cps_to_usvh
+                value = convert_cps_to_usvh(cps, args.cps_to_usvh, args.cps_to_usvh_func)
                 
                 # Get device info
                 device_id = period_events[-1]['device'] if period_events else 'unknown'
@@ -1029,7 +1165,7 @@ def main():
                 
                 # Save to local CSV
                 save_local_dose(start_time, value, hits_number, duration, device_id, avg_temp)
-                print(f"  ✓ Saved final dose to local history")
+                print(f"  Saved final dose to local history")
                 
                 # Send if enabled
                 if args.send_data:
@@ -1040,34 +1176,40 @@ def main():
                         "longitude": float(longitude),
                         "value": float(round(value, 4)),
                         "startTime": datetime.utcfromtimestamp(start_time).isoformat(),
+                        "endTime": datetime.utcfromtimestamp(end_time).isoformat(),
                         "hitsNumber": hits_number,
-                        "hitsPeriod": int(duration)
+                        "description": f"Rium GM fixed beacon measurement",
+                        "calibrationFunction": f"{args.cps_to_usvh_func}"
                     }
                     if user_id:
                         data["userId"] = user_id
+                    elif username:
+                        data["userId"] = username
+                    if user_pwd:
+                        data["userPwd"] = user_pwd
                     if all_tags:
                         data["tags"] = all_tags
                     
                     post_measurement(api_key, data, args.production)
             
-            print("\n→ Closing serial port...")
+            print("\nClosing serial port...")
             
     finally:
         try:
             ser.close()
-            print("  ✓ Serial port closed")
+            print("  Serial port closed")
         except Exception:
             pass
         
         try:
             csvfile.close()
-            print("  ✓ CSV file closed")
+            print("  CSV file closed")
         except Exception:
             pass
         
         # Remove PID file
         remove_pid_file()
-        print("  ✓ PID file removed")
+        print("  PID file removed")
         
         print("\n" + "="*60)
         print("  SHUTDOWN COMPLETE")
