@@ -81,7 +81,12 @@ The `install_dependencies.sh` script will:
 **Method 2: Manual**
 
 ```bash
-# Install dependencies
+# Install dependencies (preferred: use apt on Raspberry Pi OS)
+# Install system packages:
+sudo apt update && sudo apt install -y python3-pip python3-serial python3-requests python3-keyring
+# Or use the automated installer script:
+./install_dependencies.sh
+# If you prefer pip instead:
 pip3 install -r requirements.txt
 
 # Add user to dialout group (for serial port access)
@@ -95,10 +100,10 @@ python3 launcher.py
 ### Windows Installation
 
 ```bash
-# 1. Install dependencies
+# 2. Install dependencies
 pip install -r requirements.txt
 
-# 2. Launch
+# 3. Launch
 python launcher.py
 # Or double-click START_WINDOWS.bat
 ```
@@ -262,7 +267,9 @@ cd OR_RiumGM_fixedbeacon
 
 # 2. Install dependencies
 ./install_dependencies.sh
-# Or manually: pip3 install -r requirements.txt
+# Or, if you prefer, install system packages with apt:
+# sudo apt update && sudo apt install -y python3-serial python3-requests python3-keyring
+# Or manually via pip: pip3 install -r requirements.txt
 
 # 3. Launch
 python3 launcher.py
@@ -293,6 +300,11 @@ If you prefer manual setup:
 
 1. **Install Python dependencies**
    ```bash
+   # Preferred (Raspberry Pi OS):
+   sudo apt update && sudo apt install -y python3-serial python3-requests python3-keyring
+   # Or use the installer script:
+   ./install_dependencies.sh
+   # Or via pip:
    pip3 install -r requirements.txt
    ```
 
@@ -378,6 +390,9 @@ python read_dosimeter.py --cps-to-usvh 0.4  # Example custom factor
 python3 launcher.py  # Will detect and offer to install
 
 # Option 3: Manual installation
+# Preferred on Raspberry Pi OS:
+sudo apt update && sudo apt install -y python3-serial python3-requests python3-keyring
+# Or fall back to pip:
 pip3 install -r requirements.txt  # Linux/Mac
 pip install -r requirements.txt   # Windows
 ```

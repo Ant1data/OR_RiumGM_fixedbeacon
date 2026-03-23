@@ -188,6 +188,9 @@ def check_dependencies():
         elif choice == '2':
             print("\nTo install manually, run:")
             if is_linux():
+                print("  # Install system packages on Raspberry Pi OS (preferred)")
+                print("  sudo apt update && sudo apt install -y python3-pip python3-serial python3-requests python3-keyring")
+                print("Or, if you prefer pip:")
                 print(f"  pip3 install {' '.join(missing)}")
                 print("Or:")
                 print(f"  pip3 install -r requirements.txt")
@@ -229,8 +232,10 @@ def install_dependencies(packages):
             return True
         else:
             print("\n❌ Installation failed.")
-            print("\nTry manually with:")
+            print("\nTry installing system packages on Raspberry Pi OS (preferred):")
             if is_linux():
+                print("  sudo apt update && sudo apt install -y python3-serial python3-requests python3-keyring")
+                print("Or, install via pip:")
                 print(f"  pip3 install {' '.join(packages)}")
                 print("Or with sudo if needed:")
                 print(f"  sudo pip3 install {' '.join(packages)}")
@@ -785,8 +790,22 @@ def main():
                     "Listing available serial ports..."
                 )
                 input("\nPress Enter to continue...")
-                
+
             elif choice == '6':
+                if running:
+                    # Stop dosimeter
+                    stop_dosimeter()
+                    input("\nPress Enter to continue...")
+                elif choice == '6' and is_linux():
+                    # Setup systemd service on Linux
+                    setup_systemd_service()
+                    input("\nPress Enter to continue...")
+                else:
+                    # Exit on Windows
+                    print("\nGoodbye!")
+                    sys.exit(0)
+                
+            elif choice == '7':
                 # Setup systemd service (Linux) or Exit (Windows)
                 if is_linux():
                     setup_systemd_service()
@@ -800,7 +819,7 @@ def main():
                 # Exit on Linux
                 print("\nGoodbye!")
                 sys.exit(0)
-                
+
             else:
                 print(f"\n❌ Invalid choice. Please enter 1-{max_choice}.")
                 input("Press Enter to continue...")

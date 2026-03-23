@@ -40,19 +40,33 @@ PIP_VERSION=$(pip3 --version 2>&1 | awk '{print $2}')
 echo "✅ pip $PIP_VERSION found"
 echo ""
 
-# Install Python dependencies
-echo "→ Installing Python packages..."
+# Install Python dependencies (prefer apt packages on Raspberry Pi OS)
+echo "→ Installing Python packages (using apt when possible)..."
 echo "----------------------------------------------------------------------"
-pip3 install -r requirements.txt
 
-if [ $? -eq 0 ]; then
+apt_packages=(python3-serial python3-requests python3-keyring)
+
+sudo apt update
+sudo apt install -y "${apt_packages[@]}"
+APT_RC=$?
+
+if [ $APT_RC -eq 0 ]; then
     echo ""
-    echo "✅ Python packages installed successfully!"
+    echo "✅ System packages installed via apt successfully!"
 else
     echo ""
-    echo "❌ Failed to install packages"
-    echo "   Try with: sudo pip3 install -r requirements.txt"
-    exit 1
+    echo "⚠️  apt install failed or packages unavailable. Falling back to pip." 
+    echo "Attempting: pip3 install -r requirements.txt"
+    pip3 install -r requirements.txt
+    if [ $? -eq 0 ]; then
+        echo ""
+        echo "✅ Python packages installed successfully via pip!"
+    else
+        echo ""
+        echo "❌ Failed to install packages via pip as well"
+        echo "   Try with: sudo pip3 install -r requirements.txt"
+        exit 1
+    fi
 fi
 
 echo ""

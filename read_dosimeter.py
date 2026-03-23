@@ -132,9 +132,11 @@ def check_dependencies():
         for dep in missing:
             print(f"  - {dep}")
         print("="*60)
-        print("\nYou can install them with:")
+        print("\nOn Raspberry Pi OS you can install system packages (preferred):")
+        print("  sudo apt update && sudo apt install -y python3-serial python3-requests python3-keyring")
+        print("\nOr install with pip:")
         print(f"  pip3 install {' '.join(missing)}")
-        print("\nOr install all requirements:")
+        print("\nOr install all requirements via pip:")
         print("  pip3 install -r requirements.txt")
         print("="*60)
         
