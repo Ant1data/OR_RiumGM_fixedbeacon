@@ -162,7 +162,8 @@ def check_dependencies():
     
     required_modules = {
         'serial': 'pyserial',  # import name : package name
-        'requests': 'requests'
+        'requests': 'requests',
+        'keyring': 'keyring'
     }
     
     missing = []
@@ -218,30 +219,53 @@ def install_dependencies(packages):
     print("-" * 70)
     
     try:
-        # Determine pip command
-        pip_cmd = 'pip3' if is_linux() else 'pip'
+        # Determine apt command
+        apt_cmd = 'sudo apt update && sudo apt install -y' if is_linux() else None
         
-        # Try to install
-        cmd = [sys.executable, '-m', 'pip', 'install'] + packages
-        
-        print(f"Running: {' '.join(cmd)}\n")
-        result = subprocess.run(cmd, check=False)
-        
-        if result.returncode == 0:
-            print("\n✅ Dependencies installed successfully!")
-            return True
-        else:
-            print("\n❌ Installation failed.")
-            print("\nTry installing system packages on Raspberry Pi OS (preferred):")
-            if is_linux():
-                print("  sudo apt update && sudo apt install -y python3-serial python3-requests python3-keyring")
-                print("Or, install via pip:")
-                print(f"  pip3 install {' '.join(packages)}")
-                print("Or with sudo if needed:")
-                print(f"  sudo pip3 install {' '.join(packages)}")
+        # Try to install with apt on Linux first (preferred)
+        if apt_cmd:
+            print("\nTrying to install with apt (Linux/Raspberry Pi OS)...")
+            apt_packages = []
+            for pkg in packages:
+                if pkg == 'pyserial':
+                    apt_packages.append('python3-serial')
+                elif pkg == 'requests':
+                    apt_packages.append('python3-requests')
+                elif pkg == 'keyring':
+                    apt_packages.append('python3-keyring')
+                else:
+                    apt_packages.append(pkg)
+            
+            apt_cmd_full = f"{apt_cmd} {' '.join(apt_packages)}"
+            print(f"Running: {apt_cmd_full}\n")
+            result = subprocess.run(apt_cmd_full, shell=True, check=False)
+            
+            if result.returncode == 0:
+                print("\n✅ Dependencies installed successfully with apt!")
+                return True
             else:
-                print(f"  pip install {' '.join(packages)}")
-            return False
+                print("\n⚠️  Apt installation failed, trying pip...")
+
+                cmd = [sys.executable, '-m', 'pip', 'install'] + packages
+        
+                print(f"Running: {' '.join(cmd)}\n")
+                result = subprocess.run(cmd, check=False)
+        
+                if result.returncode == 0:
+                    print("\n✅ Dependencies installed successfully!")
+                    return True
+                else:
+                    print("\n❌ Installation failed.")
+                    print("\nTry installing system packages on Raspberry Pi OS (preferred):")
+                    if is_linux():
+                        print("  sudo apt update && sudo apt install -y python3-serial python3-requests python3-keyring")
+                        print("Or, install via pip:")
+                        print(f"  pip3 install {' '.join(packages)}")
+                        print("Or with sudo if needed:")
+                        print(f"  sudo pip3 install {' '.join(packages)}")
+                    else:
+                        print(f"  pip install {' '.join(packages)}")
+                    return False
             
     except Exception as e:
         print(f"\n❌ Error during installation: {e}")
