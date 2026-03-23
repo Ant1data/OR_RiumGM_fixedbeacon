@@ -625,6 +625,27 @@ def run_configuration_wizard():
     else:
         tags = current_tags
     print()
+
+    # Save rate (minutes)
+    current_save_rate = existing_config.get('save_rate', '')
+    if current_save_rate:
+        print(f"Current save/send interval: {current_save_rate} minutes")
+
+    while True:
+        save_rate_input = get_input("Save/send interval in minutes (min 15) (press Enter to keep current)", default=current_save_rate)
+        if save_rate_input in [None, '']:
+            save_rate = current_save_rate
+            break
+        try:
+            val = float(save_rate_input)
+            if val < 15:
+                print("  ⚠️  Minimum save rate is 15 minutes; using 15.")
+                val = 15.0
+            save_rate = str(int(val))
+            break
+        except ValueError:
+            print("  ⚠️  Please enter a valid number (minutes).")
+    print()
     
     # Summary
     print("="*70)
@@ -637,6 +658,7 @@ def run_configuration_wizard():
     location_str = f"{latitude}, {longitude}" if latitude and longitude else "Not set"
     print(f"Location: {location_str}")
     print(f"Tags: {tags if tags else 'None'}")
+    print(f"Save/send interval: {save_rate + ' minutes' if save_rate else (current_save_rate + ' minutes' if current_save_rate else 'Not set (default 15 minutes)')}")
     print("="*70)
     print()
     
@@ -649,7 +671,8 @@ def run_configuration_wizard():
             'username': username if username else '',
             'latitude': str(latitude) if latitude else current_latitude,
             'longitude': str(longitude) if longitude else current_longitude,
-            'tags': tags if tags else ''
+            'tags': tags if tags else '',
+            'save_rate': save_rate if save_rate else current_save_rate
         }
         
         # Write config file
@@ -692,6 +715,29 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     main_script = os.path.join(script_dir, 'read_dosimeter.py')
     
+    # Load configuration (to get save_rate) and check dependencies on first run
+    config_file = os.path.join(script_dir, 'config.ini')
+    cfg = configparser.ConfigParser()
+    if os.path.exists(config_file):
+        try:
+            cfg.read(config_file)
+        except Exception:
+            cfg = None
+    else:
+        cfg = None
+
+    # Determine configured save_rate in minutes (minimum 15)
+    configured_save_rate_minutes = 15
+    if cfg and cfg.has_option('DEFAULT', 'save_rate'):
+        try:
+            val = float(cfg.get('DEFAULT', 'save_rate'))
+            if val < 15:
+                configured_save_rate_minutes = 15
+            else:
+                configured_save_rate_minutes = int(val)
+        except Exception:
+            configured_save_rate_minutes = 15
+
     # Check dependencies on first run
     deps_ok = check_dependencies()
     if not deps_ok:
@@ -725,23 +771,37 @@ def main():
         def do_monitor_test():
             print("\n→ Starting monitoring with OpenRadiation upload (TEST mode)")
             print("-" * 70)
-            print("Data will be marked as 'test' in the database")
-            print("Press Ctrl+C to stop when you're satisfied it's working.\n")
-            success = run_command([
+            print("This will perform a 60s local test, then start uploading in TEST mode.")
+            print("Press Ctrl+C to stop at any time.\n")
+
+            # 1) Run a short 60s local-only test (no upload)
+            test_ok = run_command([
                 sys.executable,
                 main_script,
-                '--send-data',
+                '--test-duration', '60',
                 '--cps-to-usvh-func',
                 DEFAULT_CPS_TO_USVH_FUNC
-            ], "")
-        
-            if success and is_linux():
-                print("=" * 70)
-                print("\nYour dosimeter is working and sending data to OpenRadiation.")
-                print("You can now set it up to run automatically (survives power cuts).\n")
-                setup_service = input("Do you want to setup automatic start (systemd service)? (yes/no) [yes]: ").strip().lower()
-                if setup_service in ['', 'yes', 'y']:
-                    setup_systemd_service()
+            ], "Running 60s local test...")
+
+            # 2) After the short test, start uploading in TEST mode using configured save_rate
+            if test_ok:
+                success = run_command([
+                    sys.executable,
+                    main_script,
+                    '--send-data',
+                    '--cps-to-usvh-func',
+                    DEFAULT_CPS_TO_USVH_FUNC,
+                    '--save-rate', str(configured_save_rate_minutes)
+                ], "Starting upload (TEST mode)...")
+
+                if success and is_linux():
+                    print("=" * 70)
+                    print("\nYour dosimeter is working and sending data to OpenRadiation.")
+                    print("You can now set it up to run automatically (survives power cuts).\n")
+                    setup_service = input("Do you want to setup automatic start (systemd service)? (yes/no) [yes]: ").strip().lower()
+                    if setup_service in ['', 'yes', 'y']:
+                        setup_systemd_service()
+
             input("\nPress Enter to continue...")
 
         def do_monitor_production():
@@ -764,7 +824,8 @@ def main():
                     '--send-data',
                     '--production',
                     '--cps-to-usvh-func',
-                    DEFAULT_CPS_TO_USVH_FUNC
+                    DEFAULT_CPS_TO_USVH_FUNC,
+                    '--save-rate', str(configured_save_rate_minutes)
                 ], "")
             else:
                 print("Operation cancelled.")
