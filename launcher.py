@@ -843,7 +843,10 @@ def main():
                 # Exit on Linux
                 print("\nGoodbye!")
                 sys.exit(0)
-
+            elif choice == '8' and is_linux():
+                # Exit on Linux
+                print("\nGoodbye!")
+                sys.exit(0)
             else:
                 print(f"\n❌ Invalid choice. Please enter 1-{max_choice}.")
                 input("Press Enter to continue...")
