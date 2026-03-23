@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Optional
 
 
-SAVE_RATE = 900  # [s] - Period for aggregating and sending measurements (15 minutes minimum)
+DEFAULT_SAVE_RATE = 900  # [s] - Default period for aggregating and sending measurements (15 minutes)
 MAX_QUEUE_SIZE = 100  # Maximum number of failed measurements to keep in queue
 MAX_QUEUE_AGE_DAYS = 7  # Maximum age of queued measurements in days
 MAX_LOCAL_DOSES = 100  # Maximum number of dose measurements to keep in local CSV
@@ -676,6 +676,8 @@ def main():
     parser.add_argument('--tag', action='append', default=[], help='Add tags to measurements (can be used multiple times, e.g. --tag location=Paris --tag device=GM1)')
     parser.add_argument('--set-password', help='Set password for a user ID in the OS keyring (e.g. --set-password myuser)')
     parser.add_argument('--clear-password', help='Clear stored password for a user ID from the OS keyring (e.g. --clear-password myuser)')
+    parser.add_argument('--save-rate', type=float, help='Save/send interval in minutes (minimum 15)')
+    parser.add_argument('--test-duration', type=int, help='Run for given seconds then stop (useful for quick TEST runs)')
     
     args = parser.parse_args()
     print("Production : ", args.production)
@@ -723,6 +725,51 @@ def main():
     if config is None and args.send_data:
         print("Error: Cannot send data without valid configuration.")
         sys.exit(1)
+
+    # Determine SAVE_RATE (seconds) from CLI or config (config stored in minutes)
+    global SAVE_RATE
+    try:
+        SAVE_RATE = DEFAULT_SAVE_RATE
+    except NameError:
+        SAVE_RATE = 900
+
+    # CLI --test-duration overrides SAVE_RATE for the run
+    if args.test_duration:
+        try:
+            SAVE_RATE = int(args.test_duration)
+            # Start a background thread to request shutdown after the test duration
+            import threading
+
+            def _end_after_test(duration):
+                global shutdown_requested
+                time.sleep(duration)
+                print(f"\nTest duration ({duration}s) complete — stopping.")
+                shutdown_requested = True
+
+            t = threading.Thread(target=_end_after_test, args=(args.test_duration,), daemon=True)
+            t.start()
+        except Exception:
+            pass
+    else:
+        # Production/default: try CLI --save-rate (minutes) then config 'save_rate' (minutes)
+        if args.save_rate:
+            try:
+                minutes = float(args.save_rate)
+                if minutes < 15:
+                    print("Warning: save-rate minimum is 15 minutes; using 15 minutes.")
+                    minutes = 15.0
+                SAVE_RATE = int(minutes * 60)
+            except Exception:
+                pass
+        elif config and config.get('save_rate'):
+            try:
+                minutes = float(config.get('save_rate'))
+                if minutes < 15:
+                    print("Warning: configured save_rate is less than 15 minutes; using 15 minutes.")
+                    minutes = 15.0
+                SAVE_RATE = int(minutes * 60)
+            except Exception:
+                pass
 
     # Merge config file values with command line arguments (CLI takes precedence)
     api_key = args.api_key if args.api_key else (config.get('api_key') if config else None)

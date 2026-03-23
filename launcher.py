@@ -734,7 +734,7 @@ def main():
                 '--cps-to-usvh-func',
                 DEFAULT_CPS_TO_USVH_FUNC
             ], "")
-            # if HTTP code 200 is received, we can assume it's working correctly
+        
             if success and is_linux():
                 print("=" * 70)
                 print("\nYour dosimeter is working and sending data to OpenRadiation.")
