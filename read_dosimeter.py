@@ -592,7 +592,7 @@ def post_measurement(api_key, data, production, max_retries=3):
     for attempt in range(max_retries):
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=30)
-            if response.status_code == 201:
+            if response.status_code == 200:
                 print("Measurement posted successfully.")
                 return True
             else:

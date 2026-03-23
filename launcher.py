@@ -701,156 +701,134 @@ def main():
     
     while True:
         print_banner()
-        
+
         # Check if dosimeter is running
         running, pid = is_running()
         if running:
             print(f"🟢 Dosimeter is RUNNING (PID: {pid})")
         else:
             print("⚪ Dosimeter is STOPPED")
-        
-        print("\nWhat would you like to do?\n")
-        print("  1. 🔧 Configure station (first-time setup or reconfigure)")
-        print("  2. 📊 Start monitoring (local only, no data upload)")
-        print("  3. 🌐 Start monitoring + upload (TEST mode)")
-        print("  4. 🚀 Start monitoring + upload (PRODUCTION mode)")
-        print("  5. 📋 List available serial ports")
-        
-        # Show stop option if running
-        if running:
-            print("  6. 🛑 Stop the running dosimeter")
-            next_option = 7
-        else:
-            next_option = 6
-        
-        # Show systemd option only on Linux
-        if is_linux():
-            print(f"  {next_option}. ⚙️  Setup auto-start service (systemd)")
-            print(f"  {next_option + 1}. ❌ Exit")
-            max_choice = next_option + 1
-        else:
-            print(f"  {next_option}. ❌ Exit")
-            max_choice = next_option
-        
-        print()
-        
-        try:
-            choice = input(f"Enter your choice (1-{max_choice}): ").strip()
-            
-            if choice == '1':
-                # Configuration wizard
-                run_configuration_wizard()
-                input("\nPress Enter to continue...")
-                
-            elif choice == '2':
-                # Monitor without upload - Test the dosimeter
-                print("\n→ Starting monitoring (local only, no data upload)")
+
+        # Define action handlers
+        def do_configure():
+            run_configuration_wizard()
+            input("\nPress Enter to continue...")
+
+        def do_monitor_local():
+            print("\n→ Starting monitoring (local only, no data upload)")
+            print("-" * 70)
+            print("This will test if your dosimeter is working correctly.")
+            print("Press Ctrl+C to stop when you're satisfied it's working.\n")
+            run_command([sys.executable, main_script, '--cps-to-usvh-func', DEFAULT_CPS_TO_USVH_FUNC], "")
+            input("\nPress Enter to continue...")
+
+        def do_monitor_test():
+            print("\n→ Starting monitoring with OpenRadiation upload (TEST mode)")
+            print("-" * 70)
+            print("Data will be marked as 'test' in the database")
+            print("Press Ctrl+C to stop when you're satisfied it's working.\n")
+            success = run_command([
+                sys.executable,
+                main_script,
+                '--send-data',
+                '--cps-to-usvh-func',
+                DEFAULT_CPS_TO_USVH_FUNC
+            ], "")
+            # if HTTP code 200 is received, we can assume it's working correctly
+            if success and is_linux():
+                print("=" * 70)
+                print("\nYour dosimeter is working and sending data to OpenRadiation.")
+                print("You can now set it up to run automatically (survives power cuts).\n")
+                setup_service = input("Do you want to setup automatic start (systemd service)? (yes/no) [yes]: ").strip().lower()
+                if setup_service in ['', 'yes', 'y']:
+                    setup_systemd_service()
+            input("\nPress Enter to continue...")
+
+        def do_monitor_production():
+            print("\n⚠️  PRODUCTION MODE")
+            print("=" * 70)
+            print("This will send REAL data to OpenRadiation.")
+            print("Make sure:")
+            print("  • Configuration is correct")
+            print("  • GPS coordinates are accurate")
+            print("  • You have tested in TEST mode first")
+            print("=" * 70)
+            confirm = input("\nAre you sure? (yes/no): ").strip().lower()
+            if confirm in ['yes', 'y']:
+                print("\n→ Starting monitoring with OpenRadiation upload (PRODUCTION)")
                 print("-" * 70)
-                print("This will test if your dosimeter is working correctly.")
-                print("Press Ctrl+C to stop when you're satisfied it's working.\n")
-                
-                run_command([sys.executable, main_script, '--cps-to-usvh-func', DEFAULT_CPS_TO_USVH_FUNC], "")
-                input("\nPress Enter to continue...")
-                
-            elif choice == '3':
-                # Monitor with upload (test) - Full test with OpenRadiation
-                print("\n→ Starting monitoring with OpenRadiation upload (TEST mode)")
-                print("-" * 70)
-                print("Data will be marked as 'test' in the database")
-                print("Press Ctrl+C to stop when you're satisfied it's working.\n")
-                
-                success = run_command([
+                print("Press Ctrl+C to stop\n")
+                run_command([
                     sys.executable,
                     main_script,
                     '--send-data',
+                    '--production',
                     '--cps-to-usvh-func',
                     DEFAULT_CPS_TO_USVH_FUNC
                 ], "")
-                
-                # After successful TEST, propose systemd setup (Linux only)
-                if success and is_linux():
-                    print("="*70)
-                    print("\nYour dosimeter is working and sending data to OpenRadiation.")
-                    print("You can now set it up to run automatically (survives power cuts).")
-                    print()
-                    setup_service = input("Do you want to setup automatic start (systemd service)? (yes/no) [yes]: ").strip().lower()
-                    if setup_service in ['', 'yes', 'y']:
-                        setup_systemd_service()
-                
-                input("\nPress Enter to continue...")
-                
-            elif choice == '4':
-                # Monitor with upload (production) (ex-choice 5)
-                print("\n⚠️  PRODUCTION MODE")
-                print("="*70)
-                print("This will send REAL data to OpenRadiation.")
-                print("Make sure:")
-                print("  • Configuration is correct")
-                print("  • GPS coordinates are accurate")
-                print("  • You have tested in TEST mode first")
-                print("="*70)
-                confirm = input("\nAre you sure? (yes/no): ").strip().lower()
-                
-                if confirm in ['yes', 'y']:
-                    print("\n→ Starting monitoring with OpenRadiation upload (PRODUCTION)")
-                    print("-" * 70)
-                    print("Press Ctrl+C to stop\n")
-                    run_command([
-                        sys.executable,
-                        main_script,
-                        '--send-data',
-                        '--production',
-                        '--cps-to-usvh-func',
-                        DEFAULT_CPS_TO_USVH_FUNC
-                    ], "")
-                else:
-                    print("Operation cancelled.")
-                input("\nPress Enter to continue...")
-                
-            elif choice == '5':
-                # List ports
-                run_command(
-                    [sys.executable, main_script, '--list'],
-                    "Listing available serial ports..."
-                )
-                input("\nPress Enter to continue...")
-
-            elif choice == '6':
-                if running:
-                    # Stop dosimeter
-                    stop_dosimeter()
-                    input("\nPress Enter to continue...")
-                elif choice == '6' and is_linux():
-                    # Setup systemd service on Linux
-                    setup_systemd_service()
-                    input("\nPress Enter to continue...")
-                else:
-                    # Exit on Windows
-                    print("\nGoodbye!")
-                    sys.exit(0)
-                
-            elif choice == '7':
-                # Setup systemd service (Linux) or Exit (Windows)
-                if is_linux():
-                    setup_systemd_service()
-                    input("\nPress Enter to continue...")
-                else:
-                    # Exit on Windows
-                    print("\nGoodbye!")
-                    sys.exit(0)
-                
-            elif choice == '7' and is_linux():
-                # Exit on Linux
-                print("\nGoodbye!")
-                sys.exit(0)
-            elif choice == '8' and is_linux():
-                # Exit on Linux
-                print("\nGoodbye!")
-                sys.exit(0)
             else:
-                print(f"\n❌ Invalid choice. Please enter 1-{max_choice}.")
+                print("Operation cancelled.")
+            input("\nPress Enter to continue...")
+
+        def do_list_ports():
+            run_command([sys.executable, main_script, '--list'], "Listing available serial ports...")
+            input("\nPress Enter to continue...")
+
+        def do_stop():
+            if running:
+                stop_dosimeter()
+            else:
+                print("\n⚠️  No dosimeter instance is currently running.")
+            input("\nPress Enter to continue...")
+
+        def do_setup_service():
+            setup_systemd_service()
+            input("\nPress Enter to continue...")
+
+        def do_exit():
+            print("\nGoodbye!")
+            sys.exit(0)
+
+        # Build menu entries dynamically
+        menu = []
+        menu.append(("Configure station (first-time setup or reconfigure)", do_configure))
+        menu.append(("Start monitoring (local only, no data upload)", do_monitor_local))
+        menu.append(("Start monitoring + upload (TEST mode)", do_monitor_test))
+        menu.append(("Start monitoring + upload (PRODUCTION mode)", do_monitor_production))
+        menu.append(("List available serial ports", do_list_ports))
+
+        if running:
+            menu.append(("Stop the running dosimeter", do_stop))
+
+        if is_linux():
+            menu.append(("Setup auto-start service (systemd)", do_setup_service))
+
+        menu.append(("Exit", do_exit))
+
+        # Print menu
+        print("\nWhat would you like to do?\n")
+        for idx, (label, _) in enumerate(menu, start=1):
+            print(f"  {idx}. {label}")
+
+        print()
+
+        try:
+            choice = input(f"Enter your choice (1-{len(menu)}): ").strip()
+            if not choice.isdigit():
+                print(f"\n❌ Invalid choice. Please enter 1-{len(menu)}.")
                 input("Press Enter to continue...")
-                
+                continue
+
+            idx = int(choice)
+            if idx < 1 or idx > len(menu):
+                print(f"\n❌ Invalid choice. Please enter 1-{len(menu)}.")
+                input("Press Enter to continue...")
+                continue
+
+            # Call the selected handler
+            _, handler = menu[idx - 1]
+            handler()
+
         except KeyboardInterrupt:
             print("\n\nExiting...")
             sys.exit(0)
