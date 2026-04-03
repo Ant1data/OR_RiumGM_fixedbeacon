@@ -778,22 +778,24 @@ def main():
             test_ok = run_command([
                 sys.executable,
                 main_script,
-                '--test-duration', '60',
+                '--test-duration', '30',
                 '--cps-to-usvh-func',
                 DEFAULT_CPS_TO_USVH_FUNC
             ], "Running 60s local test...")
-
+            print("Test is ok ?")
+            print(test_ok)
             # 2) After the short test, start uploading in TEST mode using configured save_rate
             if test_ok:
                 success = run_command([
                     sys.executable,
                     main_script,
+                    '--test-duration', '30',
                     '--send-data',
                     '--cps-to-usvh-func',
                     DEFAULT_CPS_TO_USVH_FUNC,
-                    '--save-rate', str(configured_save_rate_minutes)
                 ], "Starting upload (TEST mode)...")
-
+                print("API test ?")
+                print(success)
                 if success and is_linux():
                     print("=" * 70)
                     print("\nYour dosimeter is working and sending data to OpenRadiation.")

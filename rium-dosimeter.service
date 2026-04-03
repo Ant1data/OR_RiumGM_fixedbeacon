@@ -1,0 +1,14 @@
+[Unit]
+Description=Rium GM Dosimeter Reader Service
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/OR_RiumGM_fixedbeacon
+ExecStart=/usr/bin/python3 /home/pi/OR_RiumGM_fixedbeacon/read_dosimeter.py --send-data --production
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

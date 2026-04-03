@@ -861,7 +861,9 @@ def main():
         print(f"  Location: {latitude}, {longitude}" if latitude and longitude else "  Location: NOT SET")
         print(f"  User ID: {user_id if user_id else 'NOT SET'}")
         print(f"  Tags: {', '.join(all_tags) if all_tags else 'NONE'}")
+        print(f"  Save rate: {SAVE_RATE // 60} minutes")
     print(f"Data submission: {'ENABLED (production)' if args.send_data and args.production else 'ENABLED (test mode)' if args.send_data else 'DISABLED'}")
+    
     
     # Show queue status
     if args.send_data:
