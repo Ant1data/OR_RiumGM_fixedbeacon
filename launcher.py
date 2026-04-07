@@ -3,7 +3,7 @@
 All-in-one launcher for Rium GM Dosimeter Reader.
 Provides a user-friendly menu for all operations including first-time setup.
 
-ASNR (formerly IRSN) Project
+ASNR Project
 """
 
 import configparser
@@ -12,30 +12,71 @@ import sys
 import subprocess
 import platform
 import importlib.util
-import signal
 import time
 import getpass
+import base64
+from cryptography.fernet import Fernet
 
-KEYRING_SERVICE_NAME = 'openradiation'
+PASSWORD_FILE = '.dosimeter_credentials'
+DEFAULT_SAVE_RATE_MINUTES = 30
+MINIMUM_SAVE_RATE_MINUTES = 15
 
-
-def get_keyring_password(username):
+def get_stored_password(username):
+    """Retrieve a stored password from encrypted file."""
     try:
-        import keyring
-        return keyring.get_password(KEYRING_SERVICE_NAME, username)
-    except ImportError:
-        return None
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        key_file = os.path.join(script_dir, '.dosimeter_key')
+        password_file = os.path.join(script_dir, f'.dosimeter_{username}')
+
+        if not os.path.exists(key_file) or not os.path.exists(password_file):
+            return None
+
+        # Load encryption key
+        with open(key_file, 'rb') as f:
+            key = f.read()
+
+        fernet = Fernet(key)
+
+        # Load and decrypt password
+        with open(password_file, 'rb') as f:
+            encrypted_password = f.read()
+
+        decrypted_password = fernet.decrypt(encrypted_password).decode()
+        return decrypted_password
+
     except Exception:
         return None
 
 
-def set_keyring_password(username, password):
+def set_stored_password(username, password):
+    """Store a password securely in encrypted file."""
     try:
-        import keyring
-        keyring.set_password(KEYRING_SERVICE_NAME, username, password)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        key_file = os.path.join(script_dir, '.dosimeter_key')
+        password_file = os.path.join(script_dir, f'.dosimeter_{username}')
+
+        # Generate or load encryption key
+        if not os.path.exists(key_file):
+            key = Fernet.generate_key()
+            with open(key_file, 'wb') as f:
+                f.write(key)
+            # Set restrictive permissions on key file
+            os.chmod(key_file, 0o600)
+        else:
+            with open(key_file, 'rb') as f:
+                key = f.read()
+
+        fernet = Fernet(key)
+        encrypted_password = fernet.encrypt(password.encode())
+
+        # Store encrypted password
+        with open(password_file, 'wb') as f:
+            f.write(encrypted_password)
+
+        # Set restrictive permissions on password file
+        os.chmod(password_file, 0o600)
         return True
-    except ImportError:
-        return False
+
     except Exception:
         return False
 
@@ -45,107 +86,6 @@ def is_linux():
     return platform.system() == 'Linux'
 
 
-def get_pid_file():
-    """Get the path to the PID file."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(script_dir, 'dosimeter.pid')
-
-
-def is_running():
-    """Check if the dosimeter is currently running."""
-    pid_file = get_pid_file()
-    
-    if not os.path.exists(pid_file):
-        return False, None
-    
-    try:
-        with open(pid_file, 'r') as f:
-            pid = int(f.read().strip())
-        
-        # Check if process is actually running
-        try:
-            if is_linux():
-                os.kill(pid, 0)  # Signal 0 just checks if process exists
-            else:
-                # Windows: use tasklist
-                result = subprocess.run(
-                    ['tasklist', '/FI', f'PID eq {pid}'],
-                    capture_output=True,
-                    text=True
-                )
-                if str(pid) not in result.stdout:
-                    # Stale PID file
-                    os.remove(pid_file)
-                    return False, None
-            
-            return True, pid
-            
-        except (OSError, ProcessLookupError):
-            # Process doesn't exist, remove stale PID file
-            os.remove(pid_file)
-            return False, None
-            
-    except (ValueError, IOError):
-        # Corrupted PID file
-        try:
-            os.remove(pid_file)
-        except:
-            pass
-        return False, None
-
-
-def stop_dosimeter():
-    """Stop the running dosimeter instance."""
-    running, pid = is_running()
-    
-    if not running:
-        print("\n⚠️  No dosimeter instance is currently running.")
-        return False
-    
-    print(f"\n→ Found running instance (PID: {pid})")
-    print("→ Sending shutdown signal...")
-    
-    try:
-        if is_linux():
-            # Send SIGTERM for graceful shutdown
-            os.kill(pid, signal.SIGTERM)
-        else:
-            # Windows: send Ctrl+C event
-            subprocess.run(['taskkill', '/PID', str(pid), '/T'], check=False)
-        
-        # Wait for process to stop
-        print("→ Waiting for graceful shutdown...", end='', flush=True)
-        for i in range(10):  # Wait up to 10 seconds
-            time.sleep(1)
-            print('.', end='', flush=True)
-            
-            running, _ = is_running()
-            if not running:
-                print(" ✓")
-                print("\n✅ Dosimeter stopped successfully!")
-                return True
-        
-        print(" ⏱️")
-        print("\n⚠️  Process did not stop gracefully. Force stopping...")
-        
-        # Force kill if still running
-        if is_linux():
-            os.kill(pid, signal.SIGKILL)
-        else:
-            subprocess.run(['taskkill', '/F', '/PID', str(pid)], check=False)
-        
-        time.sleep(1)
-        running, _ = is_running()
-        if not running:
-            print("✅ Process force stopped.")
-            return True
-        else:
-            print("❌ Failed to stop process.")
-            return False
-            
-    except Exception as e:
-        print(f"\n❌ Error stopping process: {e}")
-        return False
 
 
 def check_module_installed(module_name):
@@ -163,7 +103,7 @@ def check_dependencies():
     required_modules = {
         'serial': 'pyserial',  # import name : package name
         'requests': 'requests',
-        'keyring': 'keyring'
+        'cryptography.fernet': 'cryptography'
     }
     
     missing = []
@@ -190,7 +130,7 @@ def check_dependencies():
             print("\nTo install manually, run:")
             if is_linux():
                 print("  # Install system packages on Raspberry Pi OS (preferred)")
-                print("  sudo apt update && sudo apt install -y python3-pip python3-serial python3-requests python3-keyring")
+                print("  sudo apt update && sudo apt install -y python3-pip python3-serial python3-requests python3-cryptography")
                 print("Or, if you prefer pip:")
                 print(f"  pip3 install {' '.join(missing)}")
                 print("Or:")
@@ -231,8 +171,8 @@ def install_dependencies(packages):
                     apt_packages.append('python3-serial')
                 elif pkg == 'requests':
                     apt_packages.append('python3-requests')
-                elif pkg == 'keyring':
-                    apt_packages.append('python3-keyring')
+                elif pkg == 'cryptography':
+                    apt_packages.append('python3-cryptography')
                 else:
                     apt_packages.append(pkg)
             
@@ -256,17 +196,7 @@ def install_dependencies(packages):
                     return True
                 else:
                     print("\n❌ Installation failed.")
-                    print("\nTry installing system packages on Raspberry Pi OS (preferred):")
-                    if is_linux():
-                        print("  sudo apt update && sudo apt install -y python3-serial python3-requests python3-keyring")
-                        print("Or, install via pip:")
-                        print(f"  pip3 install {' '.join(packages)}")
-                        print("Or with sudo if needed:")
-                        print(f"  sudo pip3 install {' '.join(packages)}")
-                    else:
-                        print(f"  pip install {' '.join(packages)}")
-                    return False
-            
+                    return False    
     except Exception as e:
         print(f"\n❌ Error during installation: {e}")
         return False
@@ -414,7 +344,7 @@ def setup_systemd_service():
 def print_banner():
     print("\n" + "="*70)
     print("  RIUM GM DOSIMETER - Quick Launcher")
-    print("  ASNR (formerly IRSN) Project")
+    print("  ASNR Project")
     print("="*70)
     print()
 
@@ -482,7 +412,8 @@ def run_configuration_wizard():
             'password': config.get('DEFAULT', 'password', fallback=''),
             'latitude': config.get('DEFAULT', 'latitude', fallback=''),
             'longitude': config.get('DEFAULT', 'longitude', fallback=''),
-            'tags': config.get('DEFAULT', 'tags', fallback='')
+            'tags': config.get('DEFAULT', 'tags', fallback=''),
+            'save_rate': config.get('DEFAULT', 'save_rate', fallback='')
         }
         print(f"⚠️  Configuration file already exists: {config_file}")
         print("You can modify individual settings below.")
@@ -537,31 +468,31 @@ def run_configuration_wizard():
         credential_key = existing_config.get('username')
 
     if credential_key:
-        keyring_password = get_keyring_password(credential_key)
+        keyring_password = get_stored_password(credential_key)
         if keyring_password:
-            print(f"Current password is stored in OS keyring for {credential_key}.")
+            print(f"Current password is stored securely for {credential_key}.")
         else:
-            print(f"No password found in OS keyring for {credential_key}.")
+            print(f"No password found for {credential_key}.")
 
-    password_input = getpass.getpass("Enter password (press Enter to keep existing keyring value or skip): ").strip()
+    password_input = getpass.getpass("Enter password (press Enter to keep existing value or skip): ").strip()
     if password_input:
         password = password_input
     else:
         password = keyring_password if credential_key else None
     print()
 
-    # Save password securely to keyring (if provided)
+    # Save password securely to encrypted file (if provided)
     effective_user_key = user_id or username
     if password and effective_user_key:
-        if set_keyring_password(effective_user_key, password):
-            print(f"Password stored securely in OS keyring under '{effective_user_key}'.")
+        if set_stored_password(effective_user_key, password):
+            print(f"Password stored securely in encrypted file under '{effective_user_key}'.")
         else:
-            print("Warning: Unable to store password in OS keyring.")
+            print("Warning: Unable to store password securely.")
     elif password and not effective_user_key:
         print("Warning: password entered but no userId/username provided, will not be saved.")
 
     # do not store password in config.ini
-    print("(Password is NOT saved in config.ini, use keyring for secure storage.)")
+    print("(Password is NOT saved in config.ini, use encrypted file storage.)")
     print()
     
     # Location
@@ -597,40 +528,29 @@ def run_configuration_wizard():
     print("3️⃣  Station Tags (Optional)")
     print("-" * 70)
     print("Add descriptive tags to help identify and filter your station's data.")
-    print("Note: All tags will automatically be prefixed with 'fixed_beacon_'")
-    print()
-    print("Examples (enter WITHOUT the prefix):")
-    print("  • station_name=HomeStation  → becomes: fixed_beacon_station_name=HomeStation")
-    print("  • location=Paris  → becomes: fixed_beacon_location=Paris")
-    print("  • device=RiumGM_001  → becomes: fixed_beacon_device=RiumGM_001")
-    print("  • altitude=100m  → becomes: fixed_beacon_altitude=100m")
-    print()
-        
+    print("Note: The tag _fixed_beacon_ will be automatically added to identify this station as a fixed beacon.")
+
     current_tags = existing_config.get('tags', '')
     if current_tags:
         print(f"Current Tags: {current_tags}")
     
     tags_input = get_input("Tags (comma-separated, press Enter to skip)", default=current_tags)
     
-    # Add fixed_beacon_ prefix if user provided tags
-    if tags_input:
-        tag_list = [t.strip() for t in tags_input.split(',') if t.strip()]
-        prefixed_tags = []
-        for tag in tag_list:
-            if not tag.startswith('fixed_beacon_'):
-                tag = f'fixed_beacon_{tag}'
-            prefixed_tags.append(tag)
-        tags = ', '.join(prefixed_tags)
-        print(f"\n  → Tags with prefix: {tags}")
-    else:
-        tags = current_tags
-    print()
+    # always include _fixed_beacon_ tag
+    tags_list = [tag.strip() for tag in tags_input.split(',') if tag.strip()] if tags_input else []
+    if '_fixed_beacon_' not in tags_list:
+        tags_list.append('_fixed_beacon_')
+
+    tags = ','.join(tags_list)
 
     # Save rate (minutes)
     current_save_rate = existing_config.get('save_rate', '')
     if current_save_rate:
         print(f"Current save/send interval: {current_save_rate} minutes")
-
+    else:
+        print(f"Current save/send interval: Not set (default {DEFAULT_SAVE_RATE_MINUTES} minutes)")
+        current_save_rate = str(DEFAULT_SAVE_RATE_MINUTES)
+        
     while True:
         save_rate_input = get_input("Save/send interval in minutes (min 15) (press Enter to keep current)", default=current_save_rate)
         if save_rate_input in [None, '']:
@@ -638,9 +558,9 @@ def run_configuration_wizard():
             break
         try:
             val = float(save_rate_input)
-            if val < 15:
-                print("  ⚠️  Minimum save rate is 15 minutes; using 15.")
-                val = 15.0
+            if val < MINIMUM_SAVE_RATE_MINUTES:
+                print(f"  ⚠️  Minimum save rate is {MINIMUM_SAVE_RATE_MINUTES} minutes; using {MINIMUM_SAVE_RATE_MINUTES}.")
+                val = MINIMUM_SAVE_RATE_MINUTES
             save_rate = str(int(val))
             break
         except ValueError:
@@ -654,7 +574,7 @@ def run_configuration_wizard():
     masked_api = '*' * 8 + api_key[-4:] if api_key and len(api_key) > 4 else api_key if api_key else 'Not set'
     print(f"API Key: {masked_api}")
     print(f"Username/User ID: {user_id if user_id else 'Not set'}")
-    print(f"Password: {'Stored in keyring' if password else 'Not set'}")
+    print(f"Password: {'Stored in encrypted file' if password else 'Not set'}")
     location_str = f"{latitude}, {longitude}" if latitude and longitude else "Not set"
     print(f"Location: {location_str}")
     print(f"Tags: {tags if tags else 'None'}")
@@ -679,7 +599,7 @@ def run_configuration_wizard():
         with open(config_file, 'w') as f:
             f.write("# OpenRadiation API Configuration\n")
             f.write("# Generated by configuration wizard\n")
-            f.write("# ASNR (formerly IRSN) Project\n")
+            f.write("# ASNR Project\n")
             f.write("# Edit manually or run launcher again\n\n")
             config.write(f)
         
@@ -707,6 +627,19 @@ def run_command(cmd, description):
         print(f"Error: {e}")
         return False
 
+def find_candidate_ports():
+    """Return a list of likely serial ports (posix and fallback for Windows)."""
+    ports = []
+    if os.name == 'posix':
+        ports.extend(sorted(glob.glob('/dev/ttyUSB*')))
+        ports.extend(sorted(glob.glob('/dev/ttyACM*')))
+        ports.extend(sorted(glob.glob('/dev/serial/by-id/*')))
+    else:
+        # Windows: check which COM ports actually exist
+        import serial.tools.list_ports
+        available = [port.device for port in serial.tools.list_ports.comports()]
+        ports.extend(sorted(available))
+    return ports
 
 DEFAULT_CPS_TO_USVH_FUNC = "(0.00000003751 * (cps * 60 - 4)**2 + 0.00965 * (cps * 60 - 4)) * 0.85"
 
@@ -744,16 +677,9 @@ def main():
         print("\n⚠️  Please install dependencies before continuing.")
         input("Press Enter to exit...")
         sys.exit(1)
-    
+
     while True:
         print_banner()
-
-        # Check if dosimeter is running
-        running, pid = is_running()
-        if running:
-            print(f"🟢 Dosimeter is RUNNING (PID: {pid})")
-        else:
-            print("⚪ Dosimeter is STOPPED")
 
         # Define action handlers
         def do_configure():
@@ -834,14 +760,14 @@ def main():
             input("\nPress Enter to continue...")
 
         def do_list_ports():
-            run_command([sys.executable, main_script, '--list'], "Listing available serial ports...")
-            input("\nPress Enter to continue...")
-
-        def do_stop():
-            if running:
-                stop_dosimeter()
-            else:
-                print("\n⚠️  No dosimeter instance is currently running.")
+            print("\n→ Listing available serial ports")
+            print("-" * 70)
+            ports = find_candidate_ports()
+            print(f"Detected {len(ports)} serial port(s).")
+            if ports:
+                print("Available serial ports:")
+                for port in ports:
+                    print(f"  • {port}")
             input("\nPress Enter to continue...")
 
         def do_setup_service():
@@ -859,9 +785,6 @@ def main():
         menu.append(("Start monitoring + upload (TEST mode)", do_monitor_test))
         menu.append(("Start monitoring + upload (PRODUCTION mode)", do_monitor_production))
         menu.append(("List available serial ports", do_list_ports))
-
-        if running:
-            menu.append(("Stop the running dosimeter", do_stop))
 
         if is_linux():
             menu.append(("Setup auto-start service (systemd)", do_setup_service))
