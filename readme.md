@@ -95,30 +95,6 @@ cryptography >= 3.4.0
 
 ---
 
-### macOS
-
-1. **Check Python**:
-
-   ```bash
-   python3 --version
-   ```
-
-   If not installed: `brew install python3` (requires [Homebrew](https://brew.sh/)).
-
-2. **Install dependencies**:
-
-   ```bash
-   pip3 install -r requirements.txt
-   ```
-
-3. **Launch the application**:
-
-   ```bash
-   python3 launcher.py
-   ```
-
----
-
 ### Linux / Raspberry Pi
 
 **Method 1 — Automated script (recommended)**
@@ -284,7 +260,7 @@ sudo systemctl disable rium-dosimeter.service
 
 ## Contributors
 
-- E. Martinet-Gerphagnon, PhD Student, ASNR × Institut Marie Curie
+- E. Martinet-Gerphagnon, PhD Student, ASNR × Institut Curie
 - A. Dreux, Data Engineer in Dosimetry, ASNR
 
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
