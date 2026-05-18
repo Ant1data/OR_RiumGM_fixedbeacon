@@ -7,6 +7,7 @@ ASNR Project
 """
 
 import configparser
+import glob
 import os
 import sys
 import subprocess
@@ -14,16 +15,15 @@ import platform
 import importlib.util
 import time
 import getpass
-import base64
-from cryptography.fernet import Fernet
 
-PASSWORD_FILE = '.dosimeter_credentials'
+PASSWORD_FILE = '.dosimeter_credentials'  # kept for legacy reference, not actively used
 DEFAULT_SAVE_RATE_MINUTES = 30
 MINIMUM_SAVE_RATE_MINUTES = 15
 
 def get_stored_password(username):
     """Retrieve a stored password from encrypted file."""
     try:
+        from cryptography.fernet import Fernet
         script_dir = os.path.dirname(os.path.abspath(__file__))
         key_file = os.path.join(script_dir, '.dosimeter_key')
         password_file = os.path.join(script_dir, f'.dosimeter_{username}')
@@ -51,6 +51,7 @@ def get_stored_password(username):
 def set_stored_password(username, password):
     """Store a password securely in encrypted file."""
     try:
+        from cryptography.fernet import Fernet
         script_dir = os.path.dirname(os.path.abspath(__file__))
         key_file = os.path.join(script_dir, '.dosimeter_key')
         password_file = os.path.join(script_dir, f'.dosimeter_{username}')
@@ -283,10 +284,34 @@ def setup_systemd_service():
         return False
     
     try:
-        # Check if service file exists
+        # Check if service file exists — generate one if missing
         if not os.path.exists(service_file_src):
-            print(f"\n❌ Service file not found: {service_file_src}")
-            return False
+            print(f"\n\u26a0\ufe0f  Service file not found: {service_file_src}")
+            print("\u2192 Generating a default service file...")
+            python_exec = sys.executable
+            service_content = f"""[Unit]
+Description=Rium GM Dosimeter Reader
+After=network.target
+
+[Service]
+Type=simple
+User={getpass.getuser()}
+WorkingDirectory={script_dir}
+ExecStart={python_exec} {os.path.join(script_dir, 'read_dosimeter.py')} --send-data --production
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+"""
+            with open(service_file_src, 'w') as f:
+                f.write(service_content)
+            print(f"\u2705 Service file generated: {service_file_src}")
+            print("\u2139\ufe0f  Review and edit it if needed before proceeding.")
+            review = input("\nContinue with this service file? (yes/no) [yes]: ").strip().lower()
+            if review not in ['', 'yes', 'y']:
+                print("Service setup cancelled. Edit the file and try again.")
+                return False
         
         print("\n→ Installing service file...")
         # Copy service file
@@ -460,8 +485,9 @@ def run_configuration_wizard():
     print("Enter your OpenRadiation account password.")
     print()
     
-    current_password = None
+    current_password = None  # noqa: F841 — kept for potential future use
     credential_key = None
+    keyring_password = None  # initialise avant utilisation
     if existing_config.get('user_id'):
         credential_key = existing_config.get('user_id')
     elif existing_config.get('username'):
@@ -635,10 +661,14 @@ def find_candidate_ports():
         ports.extend(sorted(glob.glob('/dev/ttyACM*')))
         ports.extend(sorted(glob.glob('/dev/serial/by-id/*')))
     else:
-        # Windows: check which COM ports actually exist
-        import serial.tools.list_ports
-        available = [port.device for port in serial.tools.list_ports.comports()]
-        ports.extend(sorted(available))
+        try:
+            import serial.tools.list_ports
+            available = [port.device for port in serial.tools.list_ports.comports()]
+            ports.extend(sorted(available))
+        except ImportError:
+            print("  \u26a0\ufe0f  pyserial not installed — cannot list COM ports on Windows.")
+        except Exception as e:
+            print(f"  \u26a0\ufe0f  Error listing ports: {e}")
     return ports
 
 DEFAULT_CPS_TO_USVH_FUNC = "(0.00000003751 * (cps * 60 - 4)**2 + 0.00965 * (cps * 60 - 4)) * 0.85"
@@ -697,19 +727,28 @@ def main():
         def do_monitor_test():
             print("\n→ Starting monitoring with OpenRadiation upload (TEST mode)")
             print("-" * 70)
-            print("This will perform a 60s local test, then start uploading in TEST mode.")
+            print("This will perform a 30s local test, then a 30s upload test.")
             print("Press Ctrl+C to stop at any time.\n")
-
-            # 1) Run a short 60s local-only test (no upload)
+            # Reload save_rate from config in case user just reconfigured
+            _save_rate = 15
+            if os.path.exists(config_file):
+                try:
+                    _cfg = configparser.ConfigParser()
+                    _cfg.read(config_file)
+                    if _cfg.has_option('DEFAULT', 'save_rate'):
+                        val = float(_cfg.get('DEFAULT', 'save_rate'))
+                        _save_rate = max(15, int(val))
+                except Exception:
+                    pass
+            # 1) Run a short 30s local-only test (no upload)
             test_ok = run_command([
                 sys.executable,
                 main_script,
                 '--test-duration', '30',
                 '--cps-to-usvh-func',
                 DEFAULT_CPS_TO_USVH_FUNC
-            ], "Running 60s local test...")
-            print("Test is ok ?")
-            print(test_ok)
+            ], "Running 30s local test...")
+
             # 2) After the short test, start uploading in TEST mode using configured save_rate
             if test_ok:
                 success = run_command([
@@ -719,9 +758,9 @@ def main():
                     '--send-data',
                     '--cps-to-usvh-func',
                     DEFAULT_CPS_TO_USVH_FUNC,
-                ], "Starting upload (TEST mode)...")
-                print("API test ?")
-                print(success)
+                    '--save-rate', str(_save_rate),
+                ], "Starting 30s upload test (TEST mode)...")
+
                 if success and is_linux():
                     print("=" * 70)
                     print("\nYour dosimeter is working and sending data to OpenRadiation.")
@@ -743,6 +782,17 @@ def main():
             print("=" * 70)
             confirm = input("\nAre you sure? (yes/no): ").strip().lower()
             if confirm in ['yes', 'y']:
+                # Reload save_rate from config in case user just reconfigured
+                _prod_save_rate = 15
+                if os.path.exists(config_file):
+                    try:
+                        _cfg = configparser.ConfigParser()
+                        _cfg.read(config_file)
+                        if _cfg.has_option('DEFAULT', 'save_rate'):
+                            val = float(_cfg.get('DEFAULT', 'save_rate'))
+                            _prod_save_rate = max(15, int(val))
+                    except Exception:
+                        pass
                 print("\n→ Starting monitoring with OpenRadiation upload (PRODUCTION)")
                 print("-" * 70)
                 print("Press Ctrl+C to stop\n")
@@ -753,7 +803,7 @@ def main():
                     '--production',
                     '--cps-to-usvh-func',
                     DEFAULT_CPS_TO_USVH_FUNC,
-                    '--save-rate', str(configured_save_rate_minutes)
+                    '--save-rate', str(_prod_save_rate)
                 ], "")
             else:
                 print("Operation cancelled.")
