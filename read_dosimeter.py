@@ -20,91 +20,159 @@ If the device protocol is known, replace the simple parsing section with a prope
 """
 
 import argparse
+import atexit
 import configparser
 import csv
+import errno
 import glob
 import getpass
 import json
 import os
 import re
+import shutil
 import signal
+import subprocess
 import sys
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from cryptography.fernet import Fernet
 
 
-SAVE_RATE = 900  # [s] - Period for aggregating and sending measurements (15 minutes minimum)
+DEFAULT_SAVE_RATE = 900  # [s] - Default period for aggregating and sending measurements (15 minutes)
 MAX_QUEUE_SIZE = 100  # Maximum number of failed measurements to keep in queue
 MAX_QUEUE_AGE_DAYS = 7  # Maximum age of queued measurements in days
 MAX_LOCAL_DOSES = 100  # Maximum number of dose measurements to keep in local CSV
 
-# Service name for storing passwords in system keyring
-KEYRING_SERVICE_NAME = "openradiation"
 
-# Global flag for graceful shutdown
-shutdown_requested = False
-
-
-def signal_handler(signum, frame):
-    """Handle shutdown signals gracefully."""
-    global shutdown_requested
-    print(f"\n{'='*60}")
-    print(f"  Shutdown signal received (signal {signum})")
-    print(f"{'='*60}")
-    shutdown_requested = True
-
-
-def get_pid_file():
-    """Get the path to the PID file."""
+def get_pid_file() -> str:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(script_dir, 'dosimeter.pid')
+    return os.path.join(script_dir, 'read_dosimeter.pid')
 
 
-def create_pid_file():
-    """Create a PID file to prevent multiple instances."""
+def read_pid_file() -> Optional[int]:
     pid_file = get_pid_file()
-    
-    # Check if already running
-    if os.path.exists(pid_file):
-        try:
-            with open(pid_file, 'r') as f:
-                old_pid = int(f.read().strip())
-            
-            # Check if process is actually running
-            try:
-                os.kill(old_pid, 0)  # Signal 0 just checks if process exists
-                print(f"Another instance is already running (PID: {old_pid})")
-                print(f"   To stop it, run: kill {old_pid}")
-                return False
-            except OSError:
-                # Process doesn't exist, remove stale PID file
-                print(f"Removing stale PID file (PID {old_pid} not running)")
-                os.remove(pid_file)
-        except (ValueError, IOError):
-            # Corrupted PID file, remove it
-            os.remove(pid_file)
-    
-    # Create new PID file
+    if not os.path.exists(pid_file):
+        return None
     try:
-        with open(pid_file, 'w') as f:
-            f.write(str(os.getpid()))
+        with open(pid_file, 'r', encoding='utf-8') as f:
+            pid_text = f.read().strip()
+            return int(pid_text)
+    except Exception:
+        return None
+
+
+def is_process_running(pid: int) -> bool:
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
         return True
-    except IOError as e:
-        print(f"Warning: Could not create PID file: {e}")
-        return True  # Continue anyway
+    except OSError as exc:
+        return exc.errno != errno.ESRCH
+    return True
 
 
-def remove_pid_file():
-    """Remove the PID file on clean exit."""
+def write_pid_file() -> bool:
+    pid_file = get_pid_file()
+    try:
+        with open(pid_file, 'w', encoding='utf-8') as f:
+            f.write(str(os.getpid()))
+        try:
+            os.chmod(pid_file, 0o600)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def remove_pid_file() -> None:
     pid_file = get_pid_file()
     try:
         if os.path.exists(pid_file):
             os.remove(pid_file)
-    except IOError:
+    except Exception:
         pass
+
+
+# Global reference for signal handlers
+_global_serial_port = None
+_global_csv_file = None
+_cleanup_done = False
+
+
+def _signal_handler(signum, frame) -> None:
+    """Handle signals (SIGINT, SIGTERM) by cleanly closing resources."""
+    global _global_serial_port, _global_csv_file, _cleanup_done
+    
+    if _cleanup_done:
+        return  # Prevent duplicate cleanup
+    
+    _cleanup_done = True
+    print('\n\nShutting down gracefully...')
+    
+    # Close serial port with aggressive file descriptor cleanup
+    if _global_serial_port:
+        try:
+            # Try to flush any pending data
+            try:
+                _global_serial_port.flush()
+            except Exception:
+                pass
+            
+            # Close the serial port
+            _global_serial_port.close()
+            print('  ✓ Serial port closed')
+            
+            # Explicitly close the underlying file descriptor
+            try:
+                fd = _global_serial_port.fd
+                if fd and fd >= 0:
+                    os.close(fd)
+            except Exception:
+                pass
+                
+        except Exception as e:
+            print(f'  ✗ Error closing serial port: {e}')
+    
+    # Close CSV file
+    if _global_csv_file:
+        try:
+            _global_csv_file.flush()
+            _global_csv_file.close()
+            print('  ✓ CSV file closed')
+        except Exception as e:
+            print(f'  ✗ Error closing CSV file: {e}')
+    
+    remove_pid_file()
+    print('='*60)
+    
+    # Force exit to ensure complete process termination
+    os._exit(0)
+
+
+def setup_pidfile_cleanup() -> None:
+    """Register PID file cleanup and signal handlers."""
+    atexit.register(remove_pid_file)
+    if os.name == 'posix':
+        for sig_name in ('SIGINT', 'SIGTERM', 'SIGHUP'):
+            try:
+                signal.signal(getattr(signal, sig_name), _signal_handler)
+            except Exception:
+                pass
+
+
+def check_existing_pid_file() -> Optional[int]:
+    pid = read_pid_file()
+    if pid and is_process_running(pid):
+        return pid
+    if pid:
+        remove_pid_file()
+    return None
 
 # Check and install dependencies automatically
 def check_dependencies():
@@ -122,9 +190,9 @@ def check_dependencies():
         missing.append('requests')
     
     try:
-        import keyring
+        import cryptography
     except ImportError:
-        missing.append('keyring')
+        missing.append('cryptography')
     
     if missing:
         print("="*60)
@@ -132,9 +200,11 @@ def check_dependencies():
         for dep in missing:
             print(f"  - {dep}")
         print("="*60)
-        print("\nYou can install them with:")
+        print("\nOn Raspberry Pi OS you can install system packages (preferred):")
+        print("  sudo apt update && sudo apt install -y python3-serial python3-requests")
+        print("\nOr install with pip:")
         print(f"  pip3 install {' '.join(missing)}")
-        print("\nOr install all requirements:")
+        print("\nOr install all requirements via pip:")
         print("  pip3 install -r requirements.txt")
         print("="*60)
         
@@ -184,7 +254,7 @@ def find_candidate_ports():
     return ports
 
 
-def validate_dosimeter_connection(port, baud, timeout=5):
+def validate_dosimeter_connection(port, baud, timeout=20):
     """
     Test if a Rium GM dosimeter is connected on the given port.
     Returns True if valid frames detected, False otherwise.
@@ -199,6 +269,8 @@ def validate_dosimeter_connection(port, baud, timeout=5):
         while (time.time() - start_time) < timeout:
             if ser.in_waiting > 0:
                 b = ser.read(1)
+                if not b:
+                    continue
                 buffer.append(b[0])
                 
                 # Keep buffer reasonable
@@ -256,14 +328,14 @@ def load_config(config_path='config.ini'):
         
         with open(config_path, 'w') as f:
             f.write("# OpenRadiation API Configuration\n")
-            f.write("# ASNR (formerly IRSN) Project\n\n")
+            f.write("# ASNR Project\n\n")
             f.write("[DEFAULT]\n")
             f.write("# Get your API key from: https://www.openradiation.org/\n")
             f.write("api_key = \n\n")
             f.write("# OpenRadiation account credentials\n")
-            f.write("# Use either user_id or username plus password in OS keyring (not stored here).\n")
+            f.write("# Use either user_id or username plus password in encrypted storage (not stored here).\n")
             f.write("username = \n")
-            f.write("# password = (not stored in config.ini; use keyring command or setup wizard)\n\n")
+            f.write("# password = (not stored in config.ini; use --set-password command or setup wizard)\n\n")
             f.write("# Fixed station GPS coordinates (decimal degrees)\n")
             f.write("# Example: 48.8566 for Paris\n")
             f.write("latitude = \n")
@@ -305,29 +377,62 @@ def load_config(config_path='config.ini'):
     return config['DEFAULT']
 
 
-def get_keyring_password(username: str) -> Optional[str]:
-    """Retrieve a stored password from the OS keyring."""
+def get_stored_password(username: str) -> Optional[str]:
+    """Retrieve a stored password from encrypted file."""
     try:
-        import keyring
-    except ImportError:
-        return None
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        key_file = os.path.join(script_dir, '.dosimeter_key')
+        password_file = os.path.join(script_dir, f'.dosimeter_{username}')
 
-    try:
-        return keyring.get_password(KEYRING_SERVICE_NAME, username)
+        if not os.path.exists(key_file) or not os.path.exists(password_file):
+            return None
+
+        # Load encryption key
+        with open(key_file, 'rb') as f:
+            key = f.read()
+
+        fernet = Fernet(key)
+
+        # Load and decrypt password
+        with open(password_file, 'rb') as f:
+            encrypted_password = f.read()
+
+        decrypted_password = fernet.decrypt(encrypted_password).decode()
+        return decrypted_password
+
     except Exception:
         return None
 
 
-def set_keyring_password(username: str, password: str) -> bool:
-    """Store a password in the OS keyring."""
+def set_stored_password(username: str, password: str) -> bool:
+    """Store a password securely in encrypted file."""
     try:
-        import keyring
-    except ImportError:
-        return False
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        key_file = os.path.join(script_dir, '.dosimeter_key')
+        password_file = os.path.join(script_dir, f'.dosimeter_{username}')
 
-    try:
-        keyring.set_password(KEYRING_SERVICE_NAME, username, password)
+        # Generate or load encryption key
+        if not os.path.exists(key_file):
+            key = Fernet.generate_key()
+            with open(key_file, 'wb') as f:
+                f.write(key)
+            # Set restrictive permissions on key file
+            os.chmod(key_file, 0o600)
+        else:
+            with open(key_file, 'rb') as f:
+                key = f.read()
+
+        fernet = Fernet(key)
+        encrypted_password = fernet.encrypt(password.encode())
+
+        # Store encrypted password
+        with open(password_file, 'wb') as f:
+            f.write(encrypted_password)
+
+        # Set restrictive permissions on password file
+        os.chmod(password_file, 0o600)
         return True
+
     except Exception:
         return False
 
@@ -590,7 +695,7 @@ def post_measurement(api_key, data, production, max_retries=3):
     for attempt in range(max_retries):
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=30)
-            if response.status_code == 201:
+            if response.status_code == 200:
                 print("Measurement posted successfully.")
                 return True
             else:
@@ -644,8 +749,6 @@ def post_measurement(api_key, data, production, max_retries=3):
 
 
 def main():
-    global shutdown_requested
-    
     parser = argparse.ArgumentParser(
         description='Read Rium GM dosimeter via USB serial and log data.',
         epilog='Configuration: API credentials and location are read from config.ini file.'
@@ -672,47 +775,60 @@ def main():
     parser.add_argument('--cps-to-usvh-func', default=None, help='Conversion formula of cps to µSv/h, e.g. "(0.00000003751 * (cps * 60 - 4)**2 + 0.00965 * (cps * 60 - 4)) * 0.85"')
     parser.add_argument('--production', action='store_true', help='Set reportContext to routine (real data) instead of test. Use with caution!')
     parser.add_argument('--tag', action='append', default=[], help='Add tags to measurements (can be used multiple times, e.g. --tag location=Paris --tag device=GM1)')
-    parser.add_argument('--set-password', help='Set password for a user ID in the OS keyring (e.g. --set-password myuser)')
-    parser.add_argument('--clear-password', help='Clear stored password for a user ID from the OS keyring (e.g. --clear-password myuser)')
+    parser.add_argument('--set-password', help='Set password for a user ID in encrypted storage (e.g. --set-password myuser)')
+    parser.add_argument('--clear-password', help='Clear stored password for a user ID from encrypted storage (e.g. --clear-password myuser)')
+    parser.add_argument('--save-rate', type=float, help='Save/send interval in minutes (minimum 15)')
+    parser.add_argument('--test-duration', type=int, help='Run for given seconds then stop (useful for quick TEST runs)')
     
     args = parser.parse_args()
     print("Production : ", args.production)
     print("send_data : ", args.send_data)
     # Handle password management commands first (before other processing)
+
     if args.set_password:
         if not sys.stdin.isatty():
             print("Error: --set-password requires interactive terminal")
             sys.exit(1)
         password = getpass.getpass(f"Enter password for user '{args.set_password}': ")
-        if set_keyring_password(args.set_password, password):
+        if set_stored_password(args.set_password, password):
             print(f"Password stored securely for user '{args.set_password}'")
         else:
             print("Failed to store password")
         sys.exit(0)
     
     if args.clear_password:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        password_file = os.path.join(script_dir, f'.dosimeter_{args.clear_password}')
+        key_file = os.path.join(script_dir, '.dosimeter_key')
+        
         try:
-            import keyring
-            keyring.delete_password(KEYRING_SERVICE_NAME, args.clear_password)
-            print(f"Password cleared for user '{args.clear_password}'")
-        except ImportError:
-            print("Error: keyring not available")
+            # Remove password file if it exists
+            if os.path.exists(password_file):
+                os.remove(password_file)
+                print(f"Password cleared for user '{args.clear_password}'")
+            else:
+                print(f"No stored password found for user '{args.clear_password}'")
+            
+            # Optionally remove key file if no other passwords exist
+            # Check if any other .dosimeter_* files exist
+            import glob
+            password_files = glob.glob(os.path.join(script_dir, '.dosimeter_*'))
+            # Remove key file from the list
+            if key_file in password_files:
+                password_files.remove(key_file)
+            
+            if not password_files and os.path.exists(key_file):
+                os.remove(key_file)
+                print("Encryption key file also removed (no passwords remaining)")
+                
         except Exception as e:
             print(f"Error clearing password: {e}")
         sys.exit(0)
-
-    # Register signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
-    signal.signal(signal.SIGTERM, signal_handler)  # systemctl stop
     
-    # Create PID file to prevent multiple instances
-    if not create_pid_file():
-        sys.exit(1)
-
     # Welcome banner
     print("\n" + "="*60)
     print("  RIUM GM DOSIMETER READER")
-    print("  ASNR (formerly IRSN) Project")
+    print("  ASNR Project")
     print("="*60)
     print()
 
@@ -721,6 +837,36 @@ def main():
     if config is None and args.send_data:
         print("Error: Cannot send data without valid configuration.")
         sys.exit(1)
+
+    # Determine SAVE_RATE (seconds) from CLI or config (config stored in minutes)
+    SAVE_RATE = DEFAULT_SAVE_RATE
+    stop_time = None
+    if args.test_duration:
+        try:
+            SAVE_RATE = int(args.test_duration)
+            stop_time = time.time() + args.test_duration
+        except Exception:
+            stop_time = None
+
+    # Production/default: try CLI --save-rate (minutes) then config 'save_rate' (minutes)
+    if args.save_rate:
+        try:
+            minutes = float(args.save_rate)
+            if minutes < 15:
+                print("Warning: save-rate minimum is 15 minutes; using 15 minutes.")
+                minutes = 15.0
+            SAVE_RATE = int(minutes * 60)
+        except Exception:
+            pass
+    elif config and config.get('save_rate'):
+        try:
+            minutes = float(config.get('save_rate'))
+            if minutes < 15:
+                print("Warning: configured save_rate is less than 15 minutes; using 15 minutes.")
+                minutes = 15.0
+            SAVE_RATE = int(minutes * 60)
+        except Exception:
+            pass
 
     # Merge config file values with command line arguments (CLI takes precedence)
     api_key = args.api_key if args.api_key else (config.get('api_key') if config else None)
@@ -766,39 +912,31 @@ def main():
 
     credential_key = user_id or username
 
-    # If plain-text password is found in config, save it to keyring and use it
+    # If plain-text password is found in config, save it to encrypted storage and use it
     if user_pwd and credential_key:
-        if set_keyring_password(credential_key, user_pwd):
-            print(f"Password migrated to OS keyring for '{credential_key}'.")
+        if set_stored_password(credential_key, user_pwd):
+            print(f"Password migrated to encrypted storage for '{credential_key}'.")
         user_pwd = user_pwd  # still use current value for this session
 
-    # If we are going to send data and no password present, try keyring/prompt
+    # If we are going to send data and no password present, try encrypted storage/prompt
     if args.send_data and credential_key and not user_pwd:
-        user_pwd = get_keyring_password(credential_key)
+        user_pwd = get_stored_password(credential_key)
         if not user_pwd and sys.stdin.isatty():
             # Prompt for password once, store it securely for future runs
             user_pwd = getpass.getpass(f"Password for user '{credential_key}': ")
             if user_pwd:
-                if not set_keyring_password(credential_key, user_pwd):
-                    print("Warning: could not store password in keyring")
+                if not set_stored_password(credential_key, user_pwd):
+                    print("Warning: could not store password in encrypted storage")
         elif not user_pwd:
             print("Warning: no password stored for user; API upload may fail")
     
     # Parse tags from config file (comma-separated) and merge with CLI tags
-    # Force "fixed_beacon_" prefix on all tags
     config_tags = []
     if config and config.get('tags'):
         config_tags = [tag.strip() for tag in config.get('tags').split(',') if tag.strip()]
     
-    # Combine and ensure fixed_beacon_ prefix
-    all_tags = []
-    for tag in (config_tags + args.tag):
-        tag = tag.strip()
-        if tag:
-            # Add fixed_beacon_ prefix if not already present
-            if not tag.startswith('fixed_beacon_'):
-                tag = f'fixed_beacon_{tag}'
-            all_tags.append(tag)
+    # Combine tags from config and CLI
+    all_tags = [tag.strip() for tag in (config_tags + args.tag) if tag.strip()]
 
     # Display configuration status
     print("="*60)
@@ -812,7 +950,9 @@ def main():
         print(f"  Location: {latitude}, {longitude}" if latitude and longitude else "  Location: NOT SET")
         print(f"  User ID: {user_id if user_id else 'NOT SET'}")
         print(f"  Tags: {', '.join(all_tags) if all_tags else 'NONE'}")
+        print(f"  Save rate: {SAVE_RATE // 60} minutes")
     print(f"Data submission: {'ENABLED (production)' if args.send_data and args.production else 'ENABLED (test mode)' if args.send_data else 'DISABLED'}")
+    
     
     # Show queue status
     if args.send_data:
@@ -838,83 +978,114 @@ def main():
             sys.exit(1)
 
     candidates = find_candidate_ports()
-    if args.list:
-        print('='*60)
-        print('Available serial ports:')
-        print('='*60)
-        if candidates:
-            for p in candidates:
-                print(f'  {p}')
-        else:
-            print('  No serial ports detected!')
-            print('  Please check:')
-            print('    - Dosimeter is connected via USB')
-            print('    - USB cable is functional')
-            print('    - Device drivers are installed')
-        print('='*60)
-        return
+    print('='*60)
+    print('Available serial ports:')
+    print('='*60)
+    if candidates:
+        for p in candidates:
+            print(f'  {p}')
+    else:
+        print('  No serial ports detected!')
+        print('  Please check:')
+        print('    - Dosimeter is connected via USB')
+        print('    - USB cable is functional')
+        print('    - Device drivers are installed')
+    print('='*60)
 
     port = args.port
     if not port:
+        # If no candidate ports found, don't exit immediately. Offer interactive retry
+        # or wait briefly in non-interactive contexts. This prevents the launcher
+        # from returning immediately when the device is not yet connected.
         if not candidates:
             print('='*60)
-            print('ERROR: No serial ports detected!')
+            print('No serial ports detected.')
+            print('Please check the dosimeter connection and drivers.')
             print('='*60)
-            print('Please check:')
-            print('  1. Rium GM dosimeter is connected via USB')
-            print('  2. USB cable is functional')
-            print('  3. Device drivers are installed')
-            print('\nOn Linux, you may need permissions:')
-            print('  sudo usermod -a -G dialout $USER')
-            print('  (then logout/login)')
-            print('\nRun with --list to see available ports.')
-            print('='*60)
-            sys.exit(1)
-        
-        # Auto-detect: try to validate each candidate
-        print("Auto-detecting Rium GM dosimeter...")
-        print("="*60)
-        port = None
-        for candidate in candidates:
-            if validate_dosimeter_connection(candidate, args.baud):
-                port = candidate
-                break
-        
-        if not port:
-            print("="*60)
-            print("Could not auto-detect Rium GM dosimeter")
-            print("="*60)
-            print("Detected serial ports:")
-            for p in candidates:
-                print(f"  - {p}")
-            print("\nThe device may be:")
-            print("  • Not sending data yet (needs to detect radiation)")
-            print("  • Using a different baud rate")
-            print("  • Not a Rium GM dosimeter")
-            print("\nYou can:")
-            print("  1. Specify port manually: --port /dev/ttyUSB0")
-            print("  2. Wait for the dosimeter to start sending data")
-            print("  3. Check the dosimeter is powered on")
-            print("="*60)
-            
-            # Offer to try first port anyway
+
             if sys.stdin.isatty():
                 try:
-                    response = input(f"\nTry using {candidates[0]} anyway? (yes/no) [yes]: ").strip().lower()
-                    if response in ['', 'yes', 'y']:
-                        port = candidates[0]
-                        print(f"Using {port} (not validated)")
-                    else:
+                    user_input = input("Press Enter to retry, enter a port (e.g. COM3 or /dev/ttyUSB0), or 'q' to quit: ").strip()
+                    if user_input.lower() == 'q':
                         sys.exit(1)
+                    elif user_input:
+                        port = user_input
+                    else:
+                        # Retry once immediately
+                        candidates = find_candidate_ports()
                 except KeyboardInterrupt:
-                    print("\nCancelled.")
+                    print('\nCancelled.')
                     sys.exit(1)
             else:
-                # Non-interactive: use first port
-                port = candidates[0]
-                print(f"Non-interactive mode: using first port {port}")
+                # Non-interactive: wait up to 30s for a port to appear
+                wait_start = time.time()
+                while time.time() - wait_start < 30:
+                    candidates = find_candidate_ports()
+                    if candidates:
+                        break
+                    time.sleep(1)
+                if not candidates:
+                    print('No serial ports detected after waiting; exiting.')
+                    sys.exit(1)
+
+        # Auto-detect: try to validate each candidate
+        if not port:
+            print("Auto-detecting Rium GM dosimeter...")
+            print("="*60)
+            port = None
+            for candidate in candidates:
+                if validate_dosimeter_connection(candidate, args.baud):
+                    port = candidate
+                    break
+
+            if not port:
+                print("="*60)
+                print("Could not auto-detect Rium GM dosimeter")
+                print("="*60)
+                print("Detected serial ports:")
+                for i, p in enumerate(candidates, 1):
+                    print(f"  {i}. {p}")
+                print("\nThe device may be:")
+                print("  • Not sending data yet (needs to detect radiation)")
+                print("  • Using a different baud rate")
+                print("  • Not a Rium GM dosimeter")
+                print("\nYou can:")
+                print("  1. Choose a port from the list above")
+                print("  2. Specify port manually: --port /dev/ttyUSB0")
+                print("  3. Wait for the dosimeter to start sending data")
+                print("  4. Check the dosimeter is powered on")
+                print("="*60)
+
+                # Offer to choose from available ports
+                if sys.stdin.isatty():
+                    try:
+                        while True:
+                            choice = input(f"\nChoose a port (1-{len(candidates)}) or 'q' to quit [1]: ").strip().lower()
+                            if choice in ['', '1']:
+                                port = candidates[0]
+                                print(f"Using {port} (not validated)")
+                                break
+                            elif choice == 'q':
+                                sys.exit(1)
+                            elif choice.isdigit() and 1 <= int(choice) <= len(candidates):
+                                port = candidates[int(choice) - 1]
+                                print(f"Using {port} (not validated)")
+                                break
+                            else:
+                                print(f"Invalid choice. Please enter 1-{len(candidates)} or 'q'.")
+                    except KeyboardInterrupt:
+                        print("\nCancelled.")
+                        sys.exit(1)
+                else:
+                    # Non-interactive: use first port
+                    port = candidates[0]
+                    print(f"Non-interactive mode: using first port {port}")
     else:
         print(f'Using specified port: {port}')
+
+    setup_pidfile_cleanup()
+    if not write_pid_file():
+        print('Warning: could not write PID file; duplicate-instance protection is disabled.')
 
     print(f'\nOpening {port} at {args.baud} baud...')
     
@@ -923,12 +1094,19 @@ def main():
     retry_delay = 2
     ser = None
     
+    busy_kill_attempted = False
     for attempt in range(max_retries):
         try:
             ser = open_serial(port, args.baud)
             print(f'Connected successfully!')
             break
         except serial.SerialException as e:
+            error_text = str(e)
+            if not busy_kill_attempted and os.name == 'posix' and re.search(r'(device or resource busy|permission denied|access is denied|could not open port|readiness to read but returned no data)', error_text, re.I):
+                pids = find_port_users(port)
+                if pids and prompt_kill_port_owners(port, pids):
+                    busy_kill_attempted = True
+                    continue
             if attempt < max_retries - 1:
                 print(f'Connection failed (attempt {attempt + 1}/{max_retries}): {e}')
                 print(f'   Retrying in {retry_delay} seconds...')
@@ -950,8 +1128,12 @@ def main():
         sys.exit(2)
 
     # Ensure CSV header exists (add detailed columns)
+    global _global_serial_port, _global_csv_file
+    _global_serial_port = ser
+    
     csv_exists = os.path.exists(args.csv)
     csvfile = open(args.csv, 'a', newline='')
+    _global_csv_file = csvfile
     writer = csv.writer(csvfile)
     if not csv_exists:
         writer.writerow(['timestamp', 'iso', 'raw_hex', 'device_id', 'count', 'delay_s', 'temp_c', 'hit'])
@@ -969,15 +1151,17 @@ def main():
         period_events = []  # detailed events in current period
         time_last_save = time.time()  # Initialize to now
         device_info_shown = False  # Track if device info has been shown
-        
-        while not shutdown_requested:
+
+        while True:
             try:
                 # Blocking read for one byte — minimal latency to detect C1 events
-                # Use timeout to allow checking shutdown_requested periodically
+                # Use timeout to allow periodic check of test duration
                 ser.timeout = 0.1  # 100ms timeout
                 b = ser.read(1)
                 if not b:
-                    # No data available, check shutdown flag and continue
+                    if stop_time and time.time() >= stop_time:
+                        print(f"\nTest duration ({args.test_duration}s) complete — stopping.")
+                        break
                     continue
 
                 ts = time.time()
@@ -1040,13 +1224,15 @@ def main():
                         
                         # Calculate hit rate for current period
                         if len(period_hit_times) > 1:
-                            elapsed_hours = (ts - period_hit_times[0]) / 3600  # hours
+                            elapsed_seconds = ts - period_hit_times[0]
+                            elapsed_hours = elapsed_seconds / 3600  # hours
+                            elapsed_h = int(elapsed_seconds // 3600)
+                            elapsed_m = int((elapsed_seconds % 3600) // 60)
+                            elapsed_str = f"{elapsed_h}h:{elapsed_m:02d}m"
                             # number of hits is the number of count in every period event that is greater than 0
                             number_of_hits = sum(e['count'] for e in period_events)
                             hit_rate = number_of_hits / elapsed_hours if elapsed_hours > 0 else 0
-                            print(f'  Elapsed time: {elapsed_hours:.4f} hours')
-                            print(f'  Total hits in period: {number_of_hits}')
-                            print(f'  Period hit rate: {hit_rate:.2f} hits/hour')
+                            print(f'Elapsed time (hh:mm): {elapsed_str} | Total number of hits : {number_of_hits} | Hit rate: {hit_rate:.2f} hits/hour')
                             
                     else:
                         # Frame detected but parsing failed
@@ -1128,93 +1314,74 @@ def main():
                     period_events = []
                     time_last_save = ts
 
-
-            except serial.SerialException as se:
-                print('Serial error:', se)
-                break
             except KeyboardInterrupt:
                 print('\nInterrupted by user')
-                shutdown_requested = True
                 break
             except Exception as e:
                 print('Read loop error:', e)
                 # continue reading; don't sleep long to preserve responsiveness
                 continue
-        
-        # Graceful shutdown
-        if shutdown_requested:
-            print(f"\n{'='*60}")
-            print("  SHUTTING DOWN GRACEFULLY")
-            print(f"{'='*60}")
             
-            # Save final period if there's data
-            if period_hit_times:
-                print("\nSaving final measurement period...")
-                hits_number = len(period_hit_times)
-                start_time = period_hit_times[0]
-                end_time = period_hit_times[-1]
-                duration = end_time - start_time if end_time > start_time else 1
-                cps = hits_number / duration
-                value = convert_cps_to_usvh(cps, args.cps_to_usvh, args.cps_to_usvh_func)
-                
-                # Get device info
-                device_id = period_events[-1]['device'] if period_events else 'unknown'
-                avg_temp = sum(e['temp'] for e in period_events) / len(period_events) if period_events else 0
-                
-                print(f"  Final period: {hits_number} hits, {value:.4f} µSv/h")
-                
-                # Save to local CSV
-                save_local_dose(start_time, value, hits_number, duration, device_id, avg_temp)
-                print(f"  Saved final dose to local history")
-                
-                # Send if enabled
-                if args.send_data:
-                    report_uuid = str(uuid.uuid4())
-                    data = {
-                        "reportUuid": report_uuid,
-                        "latitude": float(latitude),
-                        "longitude": float(longitude),
-                        "value": float(round(value, 4)),
-                        "startTime": datetime.utcfromtimestamp(start_time).isoformat(),
-                        "endTime": datetime.utcfromtimestamp(end_time).isoformat(),
-                        "hitsNumber": hits_number,
-                        "description": f"Rium GM fixed beacon measurement",
-                        "calibrationFunction": f"{args.cps_to_usvh_func}"
-                    }
-                    if user_id:
-                        data["userId"] = user_id
-                    elif username:
-                        data["userId"] = username
-                    if user_pwd:
-                        data["userPwd"] = user_pwd
-                    if all_tags:
-                        data["tags"] = all_tags
-                    
-                    post_measurement(api_key, data, args.production)
-            
-            print("\nClosing serial port...")
-            
+            if stop_time and time.time() >= stop_time:
+                print(f"\nTest duration ({args.test_duration}s) complete — stopping.")
+                break
     finally:
-        try:
-            ser.close()
-            print("  Serial port closed")
-        except Exception:
-            pass
+        print("\n" + "="*60)
+        print("  SHUTDOWN SEQUENCE")
+        print("="*60)
         
+        # Close serial port with aggressive file descriptor cleanup
         try:
-            csvfile.close()
-            print("  CSV file closed")
-        except Exception:
-            pass
+            if 'ser' in locals() and ser:
+                try:
+                    ser.flush()
+                except Exception:
+                    pass
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+                # Explicitly close the underlying file descriptor
+                try:
+                    fd = ser.fd
+                    if fd and fd >= 0:
+                        os.close(fd)
+                except Exception:
+                    pass
+                print("  ✓ Serial port closed and flushed")
+        except Exception as e:
+            print(f"  ✗ Error closing serial port: {e}")
+        
+        # Close CSV file
+        try:
+            if 'csvfile' in locals() and csvfile:
+                csvfile.flush()
+                csvfile.close()
+                print("  ✓ CSV file closed and flushed")
+        except Exception as e:
+            print(f"  ✗ Error closing CSV file: {e}")
         
         # Remove PID file
-        remove_pid_file()
-        print("  PID file removed")
+        try:
+            remove_pid_file()
+            print("  ✓ PID file cleaned up")
+        except Exception as e:
+            print(f"  ✗ Error removing PID file: {e}")
         
-        print("\n" + "="*60)
+        print("="*60)
         print("  SHUTDOWN COMPLETE")
         print("="*60 + "\n")
+        
+        # Immediately terminate - no lingering processes
 
-
+        
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print('\nInterrupted by user')
+        try:
+            remove_pid_file()
+        except Exception:
+            pass
+        sys.exit(0)

@@ -3,39 +3,81 @@
 All-in-one launcher for Rium GM Dosimeter Reader.
 Provides a user-friendly menu for all operations including first-time setup.
 
-ASNR (formerly IRSN) Project
+ASNR Project
 """
 
 import configparser
+import glob
 import os
 import sys
 import subprocess
 import platform
 import importlib.util
-import signal
 import time
 import getpass
 
-KEYRING_SERVICE_NAME = 'openradiation'
+PASSWORD_FILE = '.dosimeter_credentials'  # kept for legacy reference, not actively used
+DEFAULT_SAVE_RATE_MINUTES = 30
+MINIMUM_SAVE_RATE_MINUTES = 15
 
-
-def get_keyring_password(username):
+def get_stored_password(username):
+    """Retrieve a stored password from encrypted file."""
     try:
-        import keyring
-        return keyring.get_password(KEYRING_SERVICE_NAME, username)
-    except ImportError:
-        return None
+        from cryptography.fernet import Fernet
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        key_file = os.path.join(script_dir, '.dosimeter_key')
+        password_file = os.path.join(script_dir, f'.dosimeter_{username}')
+
+        if not os.path.exists(key_file) or not os.path.exists(password_file):
+            return None
+
+        # Load encryption key
+        with open(key_file, 'rb') as f:
+            key = f.read()
+
+        fernet = Fernet(key)
+
+        # Load and decrypt password
+        with open(password_file, 'rb') as f:
+            encrypted_password = f.read()
+
+        decrypted_password = fernet.decrypt(encrypted_password).decode()
+        return decrypted_password
+
     except Exception:
         return None
 
 
-def set_keyring_password(username, password):
+def set_stored_password(username, password):
+    """Store a password securely in encrypted file."""
     try:
-        import keyring
-        keyring.set_password(KEYRING_SERVICE_NAME, username, password)
+        from cryptography.fernet import Fernet
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        key_file = os.path.join(script_dir, '.dosimeter_key')
+        password_file = os.path.join(script_dir, f'.dosimeter_{username}')
+
+        # Generate or load encryption key
+        if not os.path.exists(key_file):
+            key = Fernet.generate_key()
+            with open(key_file, 'wb') as f:
+                f.write(key)
+            # Set restrictive permissions on key file
+            os.chmod(key_file, 0o600)
+        else:
+            with open(key_file, 'rb') as f:
+                key = f.read()
+
+        fernet = Fernet(key)
+        encrypted_password = fernet.encrypt(password.encode())
+
+        # Store encrypted password
+        with open(password_file, 'wb') as f:
+            f.write(encrypted_password)
+
+        # Set restrictive permissions on password file
+        os.chmod(password_file, 0o600)
         return True
-    except ImportError:
-        return False
+
     except Exception:
         return False
 
@@ -45,107 +87,6 @@ def is_linux():
     return platform.system() == 'Linux'
 
 
-def get_pid_file():
-    """Get the path to the PID file."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(script_dir, 'dosimeter.pid')
-
-
-def is_running():
-    """Check if the dosimeter is currently running."""
-    pid_file = get_pid_file()
-    
-    if not os.path.exists(pid_file):
-        return False, None
-    
-    try:
-        with open(pid_file, 'r') as f:
-            pid = int(f.read().strip())
-        
-        # Check if process is actually running
-        try:
-            if is_linux():
-                os.kill(pid, 0)  # Signal 0 just checks if process exists
-            else:
-                # Windows: use tasklist
-                result = subprocess.run(
-                    ['tasklist', '/FI', f'PID eq {pid}'],
-                    capture_output=True,
-                    text=True
-                )
-                if str(pid) not in result.stdout:
-                    # Stale PID file
-                    os.remove(pid_file)
-                    return False, None
-            
-            return True, pid
-            
-        except (OSError, ProcessLookupError):
-            # Process doesn't exist, remove stale PID file
-            os.remove(pid_file)
-            return False, None
-            
-    except (ValueError, IOError):
-        # Corrupted PID file
-        try:
-            os.remove(pid_file)
-        except:
-            pass
-        return False, None
-
-
-def stop_dosimeter():
-    """Stop the running dosimeter instance."""
-    running, pid = is_running()
-    
-    if not running:
-        print("\n⚠️  No dosimeter instance is currently running.")
-        return False
-    
-    print(f"\n→ Found running instance (PID: {pid})")
-    print("→ Sending shutdown signal...")
-    
-    try:
-        if is_linux():
-            # Send SIGTERM for graceful shutdown
-            os.kill(pid, signal.SIGTERM)
-        else:
-            # Windows: send Ctrl+C event
-            subprocess.run(['taskkill', '/PID', str(pid), '/T'], check=False)
-        
-        # Wait for process to stop
-        print("→ Waiting for graceful shutdown...", end='', flush=True)
-        for i in range(10):  # Wait up to 10 seconds
-            time.sleep(1)
-            print('.', end='', flush=True)
-            
-            running, _ = is_running()
-            if not running:
-                print(" ✓")
-                print("\n✅ Dosimeter stopped successfully!")
-                return True
-        
-        print(" ⏱️")
-        print("\n⚠️  Process did not stop gracefully. Force stopping...")
-        
-        # Force kill if still running
-        if is_linux():
-            os.kill(pid, signal.SIGKILL)
-        else:
-            subprocess.run(['taskkill', '/F', '/PID', str(pid)], check=False)
-        
-        time.sleep(1)
-        running, _ = is_running()
-        if not running:
-            print("✅ Process force stopped.")
-            return True
-        else:
-            print("❌ Failed to stop process.")
-            return False
-            
-    except Exception as e:
-        print(f"\n❌ Error stopping process: {e}")
-        return False
 
 
 def check_module_installed(module_name):
@@ -162,7 +103,8 @@ def check_dependencies():
     
     required_modules = {
         'serial': 'pyserial',  # import name : package name
-        'requests': 'requests'
+        'requests': 'requests',
+        'cryptography.fernet': 'cryptography'
     }
     
     missing = []
@@ -188,6 +130,9 @@ def check_dependencies():
         elif choice == '2':
             print("\nTo install manually, run:")
             if is_linux():
+                print("  # Install system packages on Raspberry Pi OS (preferred)")
+                print("  sudo apt update && sudo apt install -y python3-pip python3-serial python3-requests python3-cryptography")
+                print("Or, if you prefer pip:")
                 print(f"  pip3 install {' '.join(missing)}")
                 print("Or:")
                 print(f"  pip3 install -r requirements.txt")
@@ -215,29 +160,44 @@ def install_dependencies(packages):
     print("-" * 70)
     
     try:
-        # Determine pip command
-        pip_cmd = 'pip3' if is_linux() else 'pip'
+        # Determine apt command
+        apt_cmd = 'sudo apt update && sudo apt install -y' if is_linux() else None
         
-        # Try to install
-        cmd = [sys.executable, '-m', 'pip', 'install'] + packages
-        
-        print(f"Running: {' '.join(cmd)}\n")
-        result = subprocess.run(cmd, check=False)
-        
-        if result.returncode == 0:
-            print("\n✅ Dependencies installed successfully!")
-            return True
-        else:
-            print("\n❌ Installation failed.")
-            print("\nTry manually with:")
-            if is_linux():
-                print(f"  pip3 install {' '.join(packages)}")
-                print("Or with sudo if needed:")
-                print(f"  sudo pip3 install {' '.join(packages)}")
-            else:
-                print(f"  pip install {' '.join(packages)}")
-            return False
+        # Try to install with apt on Linux first (preferred)
+        if apt_cmd:
+            print("\nTrying to install with apt (Linux/Raspberry Pi OS)...")
+            apt_packages = []
+            for pkg in packages:
+                if pkg == 'pyserial':
+                    apt_packages.append('python3-serial')
+                elif pkg == 'requests':
+                    apt_packages.append('python3-requests')
+                elif pkg == 'cryptography':
+                    apt_packages.append('python3-cryptography')
+                else:
+                    apt_packages.append(pkg)
             
+            apt_cmd_full = f"{apt_cmd} {' '.join(apt_packages)}"
+            print(f"Running: {apt_cmd_full}\n")
+            result = subprocess.run(apt_cmd_full, shell=True, check=False)
+            
+            if result.returncode == 0:
+                print("\n✅ Dependencies installed successfully with apt!")
+                return True
+            else:
+                print("\n⚠️  Apt installation failed, trying pip...")
+
+                cmd = [sys.executable, '-m', 'pip', 'install'] + packages
+        
+                print(f"Running: {' '.join(cmd)}\n")
+                result = subprocess.run(cmd, check=False)
+        
+                if result.returncode == 0:
+                    print("\n✅ Dependencies installed successfully!")
+                    return True
+                else:
+                    print("\n❌ Installation failed.")
+                    return False    
     except Exception as e:
         print(f"\n❌ Error during installation: {e}")
         return False
@@ -324,10 +284,34 @@ def setup_systemd_service():
         return False
     
     try:
-        # Check if service file exists
+        # Check if service file exists — generate one if missing
         if not os.path.exists(service_file_src):
-            print(f"\n❌ Service file not found: {service_file_src}")
-            return False
+            print(f"\n\u26a0\ufe0f  Service file not found: {service_file_src}")
+            print("\u2192 Generating a default service file...")
+            python_exec = sys.executable
+            service_content = f"""[Unit]
+Description=Rium GM Dosimeter Reader
+After=network.target
+
+[Service]
+Type=simple
+User={getpass.getuser()}
+WorkingDirectory={script_dir}
+ExecStart={python_exec} {os.path.join(script_dir, 'read_dosimeter.py')} --send-data --production
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+"""
+            with open(service_file_src, 'w') as f:
+                f.write(service_content)
+            print(f"\u2705 Service file generated: {service_file_src}")
+            print("\u2139\ufe0f  Review and edit it if needed before proceeding.")
+            review = input("\nContinue with this service file? (yes/no) [yes]: ").strip().lower()
+            if review not in ['', 'yes', 'y']:
+                print("Service setup cancelled. Edit the file and try again.")
+                return False
         
         print("\n→ Installing service file...")
         # Copy service file
@@ -385,7 +369,7 @@ def setup_systemd_service():
 def print_banner():
     print("\n" + "="*70)
     print("  RIUM GM DOSIMETER - Quick Launcher")
-    print("  ASNR (formerly IRSN) Project")
+    print("  ASNR Project")
     print("="*70)
     print()
 
@@ -453,7 +437,8 @@ def run_configuration_wizard():
             'password': config.get('DEFAULT', 'password', fallback=''),
             'latitude': config.get('DEFAULT', 'latitude', fallback=''),
             'longitude': config.get('DEFAULT', 'longitude', fallback=''),
-            'tags': config.get('DEFAULT', 'tags', fallback='')
+            'tags': config.get('DEFAULT', 'tags', fallback=''),
+            'save_rate': config.get('DEFAULT', 'save_rate', fallback='')
         }
         print(f"⚠️  Configuration file already exists: {config_file}")
         print("You can modify individual settings below.")
@@ -500,39 +485,40 @@ def run_configuration_wizard():
     print("Enter your OpenRadiation account password.")
     print()
     
-    current_password = None
+    current_password = None  # noqa: F841 — kept for potential future use
     credential_key = None
+    keyring_password = None  # initialise avant utilisation
     if existing_config.get('user_id'):
         credential_key = existing_config.get('user_id')
     elif existing_config.get('username'):
         credential_key = existing_config.get('username')
 
     if credential_key:
-        keyring_password = get_keyring_password(credential_key)
+        keyring_password = get_stored_password(credential_key)
         if keyring_password:
-            print(f"Current password is stored in OS keyring for {credential_key}.")
+            print(f"Current password is stored securely for {credential_key}.")
         else:
-            print(f"No password found in OS keyring for {credential_key}.")
+            print(f"No password found for {credential_key}.")
 
-    password_input = getpass.getpass("Enter password (press Enter to keep existing keyring value or skip): ").strip()
+    password_input = getpass.getpass("Enter password (press Enter to keep existing value or skip): ").strip()
     if password_input:
         password = password_input
     else:
         password = keyring_password if credential_key else None
     print()
 
-    # Save password securely to keyring (if provided)
+    # Save password securely to encrypted file (if provided)
     effective_user_key = user_id or username
     if password and effective_user_key:
-        if set_keyring_password(effective_user_key, password):
-            print(f"Password stored securely in OS keyring under '{effective_user_key}'.")
+        if set_stored_password(effective_user_key, password):
+            print(f"Password stored securely in encrypted file under '{effective_user_key}'.")
         else:
-            print("Warning: Unable to store password in OS keyring.")
+            print("Warning: Unable to store password securely.")
     elif password and not effective_user_key:
         print("Warning: password entered but no userId/username provided, will not be saved.")
 
     # do not store password in config.ini
-    print("(Password is NOT saved in config.ini, use keyring for secure storage.)")
+    print("(Password is NOT saved in config.ini, use encrypted file storage.)")
     print()
     
     # Location
@@ -568,33 +554,43 @@ def run_configuration_wizard():
     print("3️⃣  Station Tags (Optional)")
     print("-" * 70)
     print("Add descriptive tags to help identify and filter your station's data.")
-    print("Note: All tags will automatically be prefixed with 'fixed_beacon_'")
-    print()
-    print("Examples (enter WITHOUT the prefix):")
-    print("  • station_name=HomeStation  → becomes: fixed_beacon_station_name=HomeStation")
-    print("  • location=Paris  → becomes: fixed_beacon_location=Paris")
-    print("  • device=RiumGM_001  → becomes: fixed_beacon_device=RiumGM_001")
-    print("  • altitude=100m  → becomes: fixed_beacon_altitude=100m")
-    print()
-        
+    print("Note: The tag _fixed_beacon_ will be automatically added to identify this station as a fixed beacon.")
+
     current_tags = existing_config.get('tags', '')
     if current_tags:
         print(f"Current Tags: {current_tags}")
     
     tags_input = get_input("Tags (comma-separated, press Enter to skip)", default=current_tags)
     
-    # Add fixed_beacon_ prefix if user provided tags
-    if tags_input:
-        tag_list = [t.strip() for t in tags_input.split(',') if t.strip()]
-        prefixed_tags = []
-        for tag in tag_list:
-            if not tag.startswith('fixed_beacon_'):
-                tag = f'fixed_beacon_{tag}'
-            prefixed_tags.append(tag)
-        tags = ', '.join(prefixed_tags)
-        print(f"\n  → Tags with prefix: {tags}")
+    # always include _fixed_beacon_ tag
+    tags_list = [tag.strip() for tag in tags_input.split(',') if tag.strip()] if tags_input else []
+    if '_fixed_beacon_' not in tags_list:
+        tags_list.append('_fixed_beacon_')
+
+    tags = ','.join(tags_list)
+
+    # Save rate (minutes)
+    current_save_rate = existing_config.get('save_rate', '')
+    if current_save_rate:
+        print(f"Current save/send interval: {current_save_rate} minutes")
     else:
-        tags = current_tags
+        print(f"Current save/send interval: Not set (default {DEFAULT_SAVE_RATE_MINUTES} minutes)")
+        current_save_rate = str(DEFAULT_SAVE_RATE_MINUTES)
+        
+    while True:
+        save_rate_input = get_input("Save/send interval in minutes (min 15) (press Enter to keep current)", default=current_save_rate)
+        if save_rate_input in [None, '']:
+            save_rate = current_save_rate
+            break
+        try:
+            val = float(save_rate_input)
+            if val < MINIMUM_SAVE_RATE_MINUTES:
+                print(f"  ⚠️  Minimum save rate is {MINIMUM_SAVE_RATE_MINUTES} minutes; using {MINIMUM_SAVE_RATE_MINUTES}.")
+                val = MINIMUM_SAVE_RATE_MINUTES
+            save_rate = str(int(val))
+            break
+        except ValueError:
+            print("  ⚠️  Please enter a valid number (minutes).")
     print()
     
     # Summary
@@ -604,10 +600,11 @@ def run_configuration_wizard():
     masked_api = '*' * 8 + api_key[-4:] if api_key and len(api_key) > 4 else api_key if api_key else 'Not set'
     print(f"API Key: {masked_api}")
     print(f"Username/User ID: {user_id if user_id else 'Not set'}")
-    print(f"Password: {'Stored in keyring' if password else 'Not set'}")
+    print(f"Password: {'Stored in encrypted file' if password else 'Not set'}")
     location_str = f"{latitude}, {longitude}" if latitude and longitude else "Not set"
     print(f"Location: {location_str}")
     print(f"Tags: {tags if tags else 'None'}")
+    print(f"Save/send interval: {save_rate + ' minutes' if save_rate else (current_save_rate + ' minutes' if current_save_rate else 'Not set (default 15 minutes)')}")
     print("="*70)
     print()
     
@@ -620,14 +617,15 @@ def run_configuration_wizard():
             'username': username if username else '',
             'latitude': str(latitude) if latitude else current_latitude,
             'longitude': str(longitude) if longitude else current_longitude,
-            'tags': tags if tags else ''
+            'tags': tags if tags else '',
+            'save_rate': save_rate if save_rate else current_save_rate
         }
         
         # Write config file
         with open(config_file, 'w') as f:
             f.write("# OpenRadiation API Configuration\n")
             f.write("# Generated by configuration wizard\n")
-            f.write("# ASNR (formerly IRSN) Project\n")
+            f.write("# ASNR Project\n")
             f.write("# Edit manually or run launcher again\n\n")
             config.write(f)
         
@@ -655,6 +653,23 @@ def run_command(cmd, description):
         print(f"Error: {e}")
         return False
 
+def find_candidate_ports():
+    """Return a list of likely serial ports (posix and fallback for Windows)."""
+    ports = []
+    if os.name == 'posix':
+        ports.extend(sorted(glob.glob('/dev/ttyUSB*')))
+        ports.extend(sorted(glob.glob('/dev/ttyACM*')))
+        ports.extend(sorted(glob.glob('/dev/serial/by-id/*')))
+    else:
+        try:
+            import serial.tools.list_ports
+            available = [port.device for port in serial.tools.list_ports.comports()]
+            ports.extend(sorted(available))
+        except ImportError:
+            print("  \u26a0\ufe0f  pyserial not installed — cannot list COM ports on Windows.")
+        except Exception as e:
+            print(f"  \u26a0\ufe0f  Error listing ports: {e}")
+    return ports
 
 DEFAULT_CPS_TO_USVH_FUNC = "(0.00000003751 * (cps * 60 - 4)**2 + 0.00965 * (cps * 60 - 4)) * 0.85"
 
@@ -663,148 +678,193 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     main_script = os.path.join(script_dir, 'read_dosimeter.py')
     
+    # Load configuration (to get save_rate) and check dependencies on first run
+    config_file = os.path.join(script_dir, 'config.ini')
+    cfg = configparser.ConfigParser()
+    if os.path.exists(config_file):
+        try:
+            cfg.read(config_file)
+        except Exception:
+            cfg = None
+    else:
+        cfg = None
+
+    # Determine configured save_rate in minutes (minimum 15)
+    configured_save_rate_minutes = 15
+    if cfg and cfg.has_option('DEFAULT', 'save_rate'):
+        try:
+            val = float(cfg.get('DEFAULT', 'save_rate'))
+            if val < 15:
+                configured_save_rate_minutes = 15
+            else:
+                configured_save_rate_minutes = int(val)
+        except Exception:
+            configured_save_rate_minutes = 15
+
     # Check dependencies on first run
     deps_ok = check_dependencies()
     if not deps_ok:
         print("\n⚠️  Please install dependencies before continuing.")
         input("Press Enter to exit...")
         sys.exit(1)
-    
+
     while True:
         print_banner()
-        
-        # Check if dosimeter is running
-        running, pid = is_running()
-        if running:
-            print(f"🟢 Dosimeter is RUNNING (PID: {pid})")
-        else:
-            print("⚪ Dosimeter is STOPPED")
-        
-        print("\nWhat would you like to do?\n")
-        print("  1. 🔧 Configure station (first-time setup or reconfigure)")
-        print("  2. 📊 Start monitoring (local only, no data upload)")
-        print("  3. 🌐 Start monitoring + upload (TEST mode)")
-        print("  4. 🚀 Start monitoring + upload (PRODUCTION mode)")
-        print("  5. 📋 List available serial ports")
-        
-        # Show stop option if running
-        if running:
-            print("  6. 🛑 Stop the running dosimeter")
-            next_option = 7
-        else:
-            next_option = 6
-        
-        # Show systemd option only on Linux
-        if is_linux():
-            print(f"  {next_option}. ⚙️  Setup auto-start service (systemd)")
-            print(f"  {next_option + 1}. ❌ Exit")
-            max_choice = next_option + 1
-        else:
-            print(f"  {next_option}. ❌ Exit")
-            max_choice = next_option
-        
-        print()
-        
-        try:
-            choice = input(f"Enter your choice (1-{max_choice}): ").strip()
-            
-            if choice == '1':
-                # Configuration wizard
-                run_configuration_wizard()
-                input("\nPress Enter to continue...")
-                
-            elif choice == '2':
-                # Monitor without upload - Test the dosimeter
-                print("\n→ Starting monitoring (local only, no data upload)")
-                print("-" * 70)
-                print("This will test if your dosimeter is working correctly.")
-                print("Press Ctrl+C to stop when you're satisfied it's working.\n")
-                
-                run_command([sys.executable, main_script, '--cps-to-usvh-func', DEFAULT_CPS_TO_USVH_FUNC], "")
-                input("\nPress Enter to continue...")
-                
-            elif choice == '3':
-                # Monitor with upload (test) - Full test with OpenRadiation
-                print("\n→ Starting monitoring with OpenRadiation upload (TEST mode)")
-                print("-" * 70)
-                print("Data will be marked as 'test' in the database")
-                print("Press Ctrl+C to stop when you're satisfied it's working.\n")
-                
+
+        # Define action handlers
+        def do_configure():
+            run_configuration_wizard()
+            input("\nPress Enter to continue...")
+
+        def do_monitor_local():
+            print("\n→ Starting monitoring (local only, no data upload)")
+            print("-" * 70)
+            print("This will test if your dosimeter is working correctly.")
+            print("Press Ctrl+C to stop when you're satisfied it's working.\n")
+            run_command([sys.executable, main_script, '--cps-to-usvh-func', DEFAULT_CPS_TO_USVH_FUNC], "")
+            input("\nPress Enter to continue...")
+
+        def do_monitor_test():
+            print("\n→ Starting monitoring with OpenRadiation upload (TEST mode)")
+            print("-" * 70)
+            print("This will perform a 30s local test, then a 30s upload test.")
+            print("Press Ctrl+C to stop at any time.\n")
+            # Reload save_rate from config in case user just reconfigured
+            _save_rate = 15
+            if os.path.exists(config_file):
+                try:
+                    _cfg = configparser.ConfigParser()
+                    _cfg.read(config_file)
+                    if _cfg.has_option('DEFAULT', 'save_rate'):
+                        val = float(_cfg.get('DEFAULT', 'save_rate'))
+                        _save_rate = max(15, int(val))
+                except Exception:
+                    pass
+            # 1) Run a short 30s local-only test (no upload)
+            test_ok = run_command([
+                sys.executable,
+                main_script,
+                '--test-duration', '30',
+                '--cps-to-usvh-func',
+                DEFAULT_CPS_TO_USVH_FUNC
+            ], "Running 30s local test...")
+
+            # 2) After the short test, start uploading in TEST mode using configured save_rate
+            if test_ok:
                 success = run_command([
                     sys.executable,
                     main_script,
+                    '--test-duration', '30',
                     '--send-data',
                     '--cps-to-usvh-func',
-                    DEFAULT_CPS_TO_USVH_FUNC
-                ], "")
-                
-                # After successful TEST, propose systemd setup (Linux only)
+                    DEFAULT_CPS_TO_USVH_FUNC,
+                    '--save-rate', str(_save_rate),
+                ], "Starting 30s upload test (TEST mode)...")
+
                 if success and is_linux():
-                    print("="*70)
+                    print("=" * 70)
                     print("\nYour dosimeter is working and sending data to OpenRadiation.")
-                    print("You can now set it up to run automatically (survives power cuts).")
-                    print()
+                    print("You can now set it up to run automatically (survives power cuts).\n")
                     setup_service = input("Do you want to setup automatic start (systemd service)? (yes/no) [yes]: ").strip().lower()
                     if setup_service in ['', 'yes', 'y']:
                         setup_systemd_service()
-                
-                input("\nPress Enter to continue...")
-                
-            elif choice == '4':
-                # Monitor with upload (production) (ex-choice 5)
-                print("\n⚠️  PRODUCTION MODE")
-                print("="*70)
-                print("This will send REAL data to OpenRadiation.")
-                print("Make sure:")
-                print("  • Configuration is correct")
-                print("  • GPS coordinates are accurate")
-                print("  • You have tested in TEST mode first")
-                print("="*70)
-                confirm = input("\nAre you sure? (yes/no): ").strip().lower()
-                
-                if confirm in ['yes', 'y']:
-                    print("\n→ Starting monitoring with OpenRadiation upload (PRODUCTION)")
-                    print("-" * 70)
-                    print("Press Ctrl+C to stop\n")
-                    run_command([
-                        sys.executable,
-                        main_script,
-                        '--send-data',
-                        '--production',
-                        '--cps-to-usvh-func',
-                        DEFAULT_CPS_TO_USVH_FUNC
-                    ], "")
-                else:
-                    print("Operation cancelled.")
-                input("\nPress Enter to continue...")
-                
-            elif choice == '5':
-                # List ports
-                run_command(
-                    [sys.executable, main_script, '--list'],
-                    "Listing available serial ports..."
-                )
-                input("\nPress Enter to continue...")
-                
-            elif choice == '6':
-                # Setup systemd service (Linux) or Exit (Windows)
-                if is_linux():
-                    setup_systemd_service()
-                    input("\nPress Enter to continue...")
-                else:
-                    # Exit on Windows
-                    print("\nGoodbye!")
-                    sys.exit(0)
-                
-            elif choice == '7' and is_linux():
-                # Exit on Linux
-                print("\nGoodbye!")
-                sys.exit(0)
-                
+
+            input("\nPress Enter to continue...")
+
+        def do_monitor_production():
+            print("\n⚠️  PRODUCTION MODE")
+            print("=" * 70)
+            print("This will send REAL data to OpenRadiation.")
+            print("Make sure:")
+            print("  • Configuration is correct")
+            print("  • GPS coordinates are accurate")
+            print("  • You have tested in TEST mode first")
+            print("=" * 70)
+            confirm = input("\nAre you sure? (yes/no): ").strip().lower()
+            if confirm in ['yes', 'y']:
+                # Reload save_rate from config in case user just reconfigured
+                _prod_save_rate = 15
+                if os.path.exists(config_file):
+                    try:
+                        _cfg = configparser.ConfigParser()
+                        _cfg.read(config_file)
+                        if _cfg.has_option('DEFAULT', 'save_rate'):
+                            val = float(_cfg.get('DEFAULT', 'save_rate'))
+                            _prod_save_rate = max(15, int(val))
+                    except Exception:
+                        pass
+                print("\n→ Starting monitoring with OpenRadiation upload (PRODUCTION)")
+                print("-" * 70)
+                print("Press Ctrl+C to stop\n")
+                run_command([
+                    sys.executable,
+                    main_script,
+                    '--send-data',
+                    '--production',
+                    '--cps-to-usvh-func',
+                    DEFAULT_CPS_TO_USVH_FUNC,
+                    '--save-rate', str(_prod_save_rate)
+                ], "")
             else:
-                print(f"\n❌ Invalid choice. Please enter 1-{max_choice}.")
+                print("Operation cancelled.")
+            input("\nPress Enter to continue...")
+
+        def do_list_ports():
+            print("\n→ Listing available serial ports")
+            print("-" * 70)
+            ports = find_candidate_ports()
+            print(f"Detected {len(ports)} serial port(s).")
+            if ports:
+                print("Available serial ports:")
+                for port in ports:
+                    print(f"  • {port}")
+            input("\nPress Enter to continue...")
+
+        def do_setup_service():
+            setup_systemd_service()
+            input("\nPress Enter to continue...")
+
+        def do_exit():
+            print("\nGoodbye!")
+            sys.exit(0)
+
+        # Build menu entries dynamically
+        menu = []
+        menu.append(("Configure station (first-time setup or reconfigure)", do_configure))
+        menu.append(("Start monitoring (local only, no data upload)", do_monitor_local))
+        menu.append(("Start monitoring + upload (TEST mode)", do_monitor_test))
+        menu.append(("Start monitoring + upload (PRODUCTION mode)", do_monitor_production))
+        menu.append(("List available serial ports", do_list_ports))
+
+        if is_linux():
+            menu.append(("Setup auto-start service (systemd)", do_setup_service))
+
+        menu.append(("Exit", do_exit))
+
+        # Print menu
+        print("\nWhat would you like to do?\n")
+        for idx, (label, _) in enumerate(menu, start=1):
+            print(f"  {idx}. {label}")
+
+        print()
+
+        try:
+            choice = input(f"Enter your choice (1-{len(menu)}): ").strip()
+            if not choice.isdigit():
+                print(f"\n❌ Invalid choice. Please enter 1-{len(menu)}.")
                 input("Press Enter to continue...")
-                
+                continue
+
+            idx = int(choice)
+            if idx < 1 or idx > len(menu):
+                print(f"\n❌ Invalid choice. Please enter 1-{len(menu)}.")
+                input("Press Enter to continue...")
+                continue
+
+            # Call the selected handler
+            _, handler = menu[idx - 1]
+            handler()
+
         except KeyboardInterrupt:
             print("\n\nExiting...")
             sys.exit(0)
