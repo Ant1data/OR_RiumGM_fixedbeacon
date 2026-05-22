@@ -674,6 +674,104 @@ def find_candidate_ports():
 DEFAULT_CPS_TO_USVH_FUNC = "(0.00000003751 * (cps * 60 - 4)**2 + 0.00965 * (cps * 60 - 4)) * 0.85"
 
 
+def check_openradiation_api(config_file):
+    """
+    Vérifie que les identifiants OpenRadiation sont valides en envoyant
+    un payload minimal en mode test (reportContext=test).
+    Retourne True si l'API répond 200, False sinon.
+    """
+    print("\n" + "-" * 70)
+    print("Vérification des identifiants OpenRadiation (envoi test API)...")
+
+    # Lire la configuration
+    cfg = configparser.ConfigParser()
+    if not os.path.exists(config_file):
+        print("  ✗ Fichier config.ini introuvable. Configurez d'abord le système (option 1).")
+        return False
+    try:
+        cfg.read(config_file)
+    except Exception as e:
+        print(f"  ✗ Erreur lecture config.ini : {e}")
+        return False
+
+    api_key = cfg.get('DEFAULT', 'api_key', fallback='').strip()
+    username = cfg.get('DEFAULT', 'username', fallback='').strip()
+    latitude = cfg.get('DEFAULT', 'latitude', fallback='0').strip()
+    longitude = cfg.get('DEFAULT', 'longitude', fallback='0').strip()
+
+    if not api_key:
+        print("  ✗ api_key absent dans config.ini. Configurez d'abord le système (option 1).")
+        return False
+    if not username:
+        print("  ✗ username absent dans config.ini. Configurez d'abord le système (option 1).")
+        return False
+
+    # Récupérer le mot de passe stocké
+    user_pwd = get_stored_password(username)
+    if not user_pwd:
+        if sys.stdin.isatty():
+            user_pwd = getpass.getpass(f"  Mot de passe pour '{username}' : ")
+        if not user_pwd:
+            print("  ✗ Aucun mot de passe disponible pour cet utilisateur.")
+            return False
+
+    # Construire un payload minimal en mode test
+    try:
+        import uuid
+        from datetime import datetime, timezone
+        import requests
+    except ImportError as e:
+        print(f"  ✗ Module manquant : {e}. Installez les dépendances (option 4).")
+        return False
+
+    now = datetime.now(tz=timezone.utc)
+    payload = {
+        "apiKey": api_key,
+        "data": {
+            "reportUuid": str(uuid.uuid4()),
+            "latitude": float(latitude) if latitude else 0.0,
+            "longitude": float(longitude) if longitude else 0.0,
+            "value": 0.1,
+            "startTime": now.isoformat(),
+            "endTime": now.isoformat(),
+            "hitsNumber": 10,
+            "userId": username,
+            "userPwd": user_pwd,
+            "reportContext": "test",
+            "description": "API credential check from launcher"
+        }
+    }
+
+    url = "https://submit.openradiation.net/measurements"
+    print(f"  → Envoi vers {url} (mode test, userId='{username}')...")
+    try:
+        response = requests.post(url, json=payload,
+                                 headers={'Content-Type': 'application/json'},
+                                 timeout=15)
+        if response.status_code == 200:
+            print("  ✓ Identifiants valides ! L'API a accepté l'envoi (HTTP 200).")
+            return True
+        elif response.status_code == 401:
+            print(f"  ✗ Identifiants refusés (HTTP 401) : mot de passe ou api_key incorrect.")
+            print(f"     Réponse : {response.text[:200]}")
+            return False
+        else:
+            print(f"  ✗ Réponse inattendue de l'API (HTTP {response.status_code}).")
+            print(f"     Réponse : {response.text[:200]}")
+            return False
+    except requests.exceptions.Timeout:
+        print("  ✗ Timeout : impossible de joindre l'API OpenRadiation (>15s).")
+        return False
+    except requests.exceptions.ConnectionError:
+        print("  ✗ Pas de connexion internet ou l'API est inaccessible.")
+        return False
+    except Exception as e:
+        print(f"  ✗ Erreur lors de l'envoi : {e}")
+        return False
+    finally:
+        print("-" * 70)
+
+
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     main_script = os.path.join(script_dir, 'read_dosimeter.py')
@@ -729,6 +827,16 @@ def main():
             print("-" * 70)
             print("This will perform a 30s local test, then a 30s upload test.")
             print("Press Ctrl+C to stop at any time.\n")
+            # Vérification rapide des identifiants API avant de lancer les tests
+            api_ok = check_openradiation_api(config_file)
+            if not api_ok:
+                print("\n⚠️  La vérification des identifiants API a échoué.")
+                print("   Le test d'envoi risque d'échouer. Vérifiez votre config (option 1).")
+                proceed = input("\nContinuer quand même ? (oui/non) [non] : ").strip().lower()
+                if proceed not in ['oui', 'o', 'yes', 'y']:
+                    input("\nAppuyez sur Entrée pour continuer...")
+                    return
+            print()
             # Reload save_rate from config in case user just reconfigured
             _save_rate = 15
             if os.path.exists(config_file):

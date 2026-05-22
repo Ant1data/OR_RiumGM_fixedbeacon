@@ -48,7 +48,10 @@ MAX_LOCAL_DOSES = 100  # Maximum number of dose measurements to keep in local CS
 
 
 def get_pid_file() -> str:
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
     return os.path.join(script_dir, 'read_dosimeter.pid')
 
 
