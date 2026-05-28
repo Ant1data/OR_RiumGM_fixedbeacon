@@ -1020,16 +1020,23 @@ def main():
                     print('\nCancelled.')
                     sys.exit(1)
             else:
-                # Non-interactive: wait up to 30s for a port to appear
-                wait_start = time.time()
-                while time.time() - wait_start < 30:
+                # Non-interactive (service) mode: retry 3 times with a delay between attempts
+                USB_MAX_RETRIES = 3
+                USB_RETRY_DELAY = 15  # seconds between attempts
+                usb_found = False
+                for usb_attempt in range(1, USB_MAX_RETRIES + 1):
+                    print(f'USB scan attempt {usb_attempt}/{USB_MAX_RETRIES}...')
                     candidates = find_candidate_ports()
                     if candidates:
+                        usb_found = True
                         break
-                    time.sleep(1)
-                if not candidates:
-                    print('No serial ports detected after waiting; exiting.')
-                    sys.exit(1)
+                    if usb_attempt < USB_MAX_RETRIES:
+                        print(f'No USB serial port found. Retrying in {USB_RETRY_DELAY}s...')
+                        time.sleep(USB_RETRY_DELAY)
+                if not usb_found:
+                    print('No serial ports detected after 3 attempts.')
+                    print('Service will stop cleanly and restart at next system boot.')
+                    sys.exit(0)  # Exit code 0 = clean stop; systemd (Restart=on-failure) won't restart immediately
 
         # Auto-detect: try to validate each candidate
         if not port:

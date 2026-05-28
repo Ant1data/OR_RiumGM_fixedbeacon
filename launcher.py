@@ -288,16 +288,16 @@ def setup_systemd_service():
         if not os.path.exists(service_file_src):
             print(f"\n\u26a0\ufe0f  Service file not found: {service_file_src}")
             print("\u2192 Generating a default service file...")
-            python_exec = sys.executable
             service_content = f"""[Unit]
 Description=Rium GM Dosimeter Reader
-After=network.target
+After=multi-user.target
+Wants=multi-user.target
 
 [Service]
 Type=simple
-User={getpass.getuser()}
-WorkingDirectory={script_dir}
-ExecStart={python_exec} {os.path.join(script_dir, 'read_dosimeter.py')} --send-data --production
+User=root
+WorkingDirectory=/home/{getpass.getuser()}/OR_RiumGM_fixedbeacon
+ExecStart=/usr/bin/python3 /home/{getpass.getuser()}/OR_RiumGM_fixedbeacon/read_dosimeter.py --send-data --production
 Restart=on-failure
 RestartSec=10
 
@@ -366,11 +366,55 @@ WantedBy=multi-user.target
         return False
 
 
+# ANSI colours (work on Linux/Raspberry Pi terminals)
+_GREEN = '\033[32m'
+_RED   = '\033[31m'
+_RESET = '\033[0m'
+
+SERVICE_NAME = 'rium-dosimeter.service'
+
+
+def get_service_status():
+    """Return (enabled, active) booleans for the systemd service (Linux only)."""
+    if not is_linux():
+        return None, None
+    try:
+        enabled_result = subprocess.run(
+            ['systemctl', 'is-enabled', SERVICE_NAME],
+            capture_output=True, text=True
+        )
+        active_result = subprocess.run(
+            ['systemctl', 'is-active', SERVICE_NAME],
+            capture_output=True, text=True
+        )
+        enabled = enabled_result.stdout.strip() == 'enabled'
+        active  = active_result.stdout.strip()  == 'active'
+        return enabled, active
+    except Exception:
+        return None, None
+
+
 def print_banner():
     print("\n" + "="*70)
     print("  RIUM GM DOSIMETER - Quick Launcher")
     print("  ASNR Project")
     print("="*70)
+
+    if is_linux():
+        enabled, active = get_service_status()
+        if enabled is None:
+            svc_line = "  Service status : unknown"
+        else:
+            if enabled and active:
+                svc_line = f"  Service : {_GREEN}enabled / active{_RESET}"
+            elif enabled and not active:
+                svc_line = f"  Service : {_RED}enabled / inactive{_RESET}"
+            elif not enabled and active:
+                svc_line = f"  Service : {_RED}disabled / active{_RESET}"
+            else:
+                svc_line = f"  Service : {_RED}disabled / inactive{_RESET}"
+        print(svc_line)
+        print("="*70)
     print()
 
 
@@ -946,6 +990,44 @@ def main():
 
         if is_linux():
             menu.append(("Setup auto-start service (systemd)", do_setup_service))
+
+            def do_service_status():
+                """Affiche le statut complet du service systemd."""
+                print("\n→ Statut du service systemd")
+                print("-" * 70)
+                subprocess.run(['sudo', 'systemctl', 'status', SERVICE_NAME, '--no-pager'])
+                print()
+                subprocess.run(['journalctl', '-u', SERVICE_NAME, '-n', '30', '--no-pager'])
+                input("\nAppuyez sur Entrée pour continuer...")
+
+            def do_stop_service():
+                """Arrête le service systemd."""
+                enabled, active = get_service_status()
+                if not active:
+                    print("\n⚠️  Le service n'est pas actif.")
+                    input("\nAppuyez sur Entrée pour continuer...")
+                    return
+                confirm = input("\nArrêter le service rium-dosimeter ? (oui/non) [non] : ").strip().lower()
+                if confirm in ['oui', 'o', 'yes', 'y']:
+                    subprocess.run(['sudo', 'systemctl', 'stop', SERVICE_NAME], check=False)
+                    print("✅ Service arrêté.")
+                else:
+                    print("Annulé.")
+                input("\nAppuyez sur Entrée pour continuer...")
+
+            def do_shutdown():
+                """Éteint le Raspberry Pi / l'Arduino après confirmation."""
+                confirm = input("\n⚠️  Éteindre la machine maintenant ? (oui/non) [non] : ").strip().lower()
+                if confirm in ['oui', 'o', 'yes', 'y']:
+                    print("→ Extinction en cours...")
+                    subprocess.run(['sudo', 'shutdown', '-h', 'now'], check=False)
+                else:
+                    print("Annulé.")
+                input("\nAppuyez sur Entrée pour continuer...")
+
+            menu.append(("Voir statut du service", do_service_status))
+            menu.append(("Arrêter le service", do_stop_service))
+            menu.append(("Éteindre la machine (shutdown)", do_shutdown))
 
         menu.append(("Exit", do_exit))
 
