@@ -362,8 +362,10 @@ The service uses `Restart=on-failure`. A clean exit (`exit 0`, e.g. USB not foun
 | git pull update | ✅ | ✅ | ✅ |
 | Systemd service management | ❌ | ❌ | ✅ |
 | Shutdown option | ❌ | ❌ | ✅ |
-- E. Martinet-Gerphagnon, PhD Student, ASNR × Institut Curie
+
 - A. Dreux, Data Engineer in Dosimetry, ASNR
+- E. Martinet-Gerphagnon, PhD Student, ASNR × Institut Curie
+
 
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
