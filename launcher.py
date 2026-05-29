@@ -394,6 +394,113 @@ def get_service_status():
         return None, None
 
 
+def update_project():
+    """
+    Pull latest changes from the git remote.
+    - Stops the systemd service if running (to avoid file-in-use issues).
+    - Runs git pull.
+    - Restarts the service if it was stopped.
+    - Re-executes launcher.py so the new version is loaded immediately.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    print("\n" + "="*70)
+    print("  UPDATE PROJECT (git pull)")
+    print("="*70)
+
+    # 1. Check git is available
+    git_check = subprocess.run(['git', '--version'], capture_output=True, text=True)
+    if git_check.returncode != 0:
+        print("\n❌ git is not installed or not in PATH.")
+        print("   Install it with: sudo apt install git")
+        return
+
+    # 2. Check we are inside a git repository
+    repo_check = subprocess.run(
+        ['git', '-C', script_dir, 'rev-parse', '--is-inside-work-tree'],
+        capture_output=True, text=True
+    )
+    if repo_check.returncode != 0:
+        print(f"\n❌ {script_dir} is not a git repository.")
+        print("   Clone the project first: git clone <url>")
+        return
+
+    # 3. Show current state
+    branch = subprocess.run(
+        ['git', '-C', script_dir, 'rev-parse', '--abbrev-ref', 'HEAD'],
+        capture_output=True, text=True
+    ).stdout.strip()
+    last_commit = subprocess.run(
+        ['git', '-C', script_dir, 'log', '-1', '--oneline'],
+        capture_output=True, text=True
+    ).stdout.strip()
+    print(f"\n  Branch  : {branch}")
+    print(f"  Current : {last_commit}")
+
+    confirm = input("\nPull latest changes from remote? (yes/no) [yes]: ").strip().lower()
+    if confirm not in ['', 'yes', 'y']:
+        print("Update cancelled.")
+        return
+
+    # 4. Stop service if active (avoid read_dosimeter.py being replaced mid-run)
+    service_was_active = False
+    if is_linux():
+        _, active = get_service_status()
+        if active:
+            print("\n→ Stopping service before update...")
+            subprocess.run(['sudo', 'systemctl', 'stop', SERVICE_NAME], check=False)
+            service_was_active = True
+            print("  ✅ Service stopped.")
+
+    # 5. git pull
+    print("\n→ Running git pull...")
+    print("-" * 70)
+    pull = subprocess.run(
+        ['git', '-C', script_dir, 'pull'],
+        text=True
+    )
+    print("-" * 70)
+
+    if pull.returncode != 0:
+        print("\n❌ git pull failed (see output above).")
+        print("   Possible causes: merge conflict, no remote configured, no internet.")
+        # Restart service even if pull failed
+        if service_was_active and is_linux():
+            print("\n→ Restarting service (pull failed, restoring previous state)...")
+            subprocess.run(['sudo', 'systemctl', 'start', SERVICE_NAME], check=False)
+        return
+
+    # 6. Show what changed
+    new_commit = subprocess.run(
+        ['git', '-C', script_dir, 'log', '-1', '--oneline'],
+        capture_output=True, text=True
+    ).stdout.strip()
+    if new_commit == last_commit:
+        print("\n✅ Already up to date — no changes pulled.")
+    else:
+        print(f"\n✅ Updated to: {new_commit}")
+        changed = subprocess.run(
+            ['git', '-C', script_dir, 'diff', '--name-only', last_commit, 'HEAD'],
+            capture_output=True, text=True
+        ).stdout.strip()
+        if changed:
+            print("  Changed files:")
+            for f in changed.splitlines():
+                print(f"    • {f}")
+
+    # 7. Restart service if it was running
+    if service_was_active and is_linux():
+        print("\n→ Restarting service with updated code...")
+        subprocess.run(['sudo', 'systemctl', 'start', SERVICE_NAME], check=False)
+        print("  ✅ Service restarted.")
+
+    # 8. Re-execute launcher.py so the new version is loaded
+    print("\n→ Reloading launcher with updated version...")
+    print("="*70 + "\n")
+    os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
+    # execv replaces the current process — code below is never reached
+
+
 def print_banner():
     print("\n" + "="*70)
     print("  RIUM GM DOSIMETER - Quick Launcher")
@@ -871,14 +978,14 @@ def main():
             print("-" * 70)
             print("This will perform a 30s local test, then a 30s upload test.")
             print("Press Ctrl+C to stop at any time.\n")
-            # Vérification rapide des identifiants API avant de lancer les tests
+            # Quick API credentials check before running tests
             api_ok = check_openradiation_api(config_file)
             if not api_ok:
-                print("\n⚠️  La vérification des identifiants API a échoué.")
-                print("   Le test d'envoi risque d'échouer. Vérifiez votre config (option 1).")
-                proceed = input("\nContinuer quand même ? (oui/non) [non] : ").strip().lower()
-                if proceed not in ['oui', 'o', 'yes', 'y']:
-                    input("\nAppuyez sur Entrée pour continuer...")
+                print("\n⚠️  API credentials check failed.")
+                print("   Upload test may fail. Please verify your config (option 1).")
+                proceed = input("\nContinue anyway? (yes/no) [no]: ").strip().lower()
+                if proceed not in ['yes', 'y']:
+                    input("\nPress Enter to continue...")
                     return
             print()
             # Reload save_rate from config in case user just reconfigured
@@ -992,43 +1099,66 @@ def main():
             menu.append(("Setup auto-start service (systemd)", do_setup_service))
 
             def do_service_status():
-                """Affiche le statut complet du service systemd."""
-                print("\n→ Statut du service systemd")
+                """Display full systemd service status."""
+                print("\n→ Systemd service status")
                 print("-" * 70)
                 subprocess.run(['sudo', 'systemctl', 'status', SERVICE_NAME, '--no-pager'])
                 print()
                 subprocess.run(['journalctl', '-u', SERVICE_NAME, '-n', '30', '--no-pager'])
-                input("\nAppuyez sur Entrée pour continuer...")
+                input("\nPress Enter to continue...")
 
             def do_stop_service():
-                """Arrête le service systemd."""
+                """Stop the systemd service."""
                 enabled, active = get_service_status()
                 if not active:
-                    print("\n⚠️  Le service n'est pas actif.")
-                    input("\nAppuyez sur Entrée pour continuer...")
+                    print("\n⚠️  The service is not active.")
+                    input("\nPress Enter to continue...")
                     return
-                confirm = input("\nArrêter le service rium-dosimeter ? (oui/non) [non] : ").strip().lower()
-                if confirm in ['oui', 'o', 'yes', 'y']:
+                confirm = input("\nStop the rium-dosimeter service? (yes/no) [no]: ").strip().lower()
+                if confirm in ['yes', 'y']:
                     subprocess.run(['sudo', 'systemctl', 'stop', SERVICE_NAME], check=False)
-                    print("✅ Service arrêté.")
+                    print("✅ Service stopped.")
                 else:
-                    print("Annulé.")
-                input("\nAppuyez sur Entrée pour continuer...")
+                    print("Cancelled.")
+                input("\nPress Enter to continue...")
 
             def do_shutdown():
-                """Éteint le Raspberry Pi / l'Arduino après confirmation."""
-                confirm = input("\n⚠️  Éteindre la machine maintenant ? (oui/non) [non] : ").strip().lower()
-                if confirm in ['oui', 'o', 'yes', 'y']:
-                    print("→ Extinction en cours...")
+                """Shut down the Raspberry Pi after confirmation."""
+                confirm = input("\n⚠️  Shut down the machine now? (yes/no) [no]: ").strip().lower()
+                if confirm in ['yes', 'y']:
+                    print("→ Shutting down...")
                     subprocess.run(['sudo', 'shutdown', '-h', 'now'], check=False)
                 else:
-                    print("Annulé.")
-                input("\nAppuyez sur Entrée pour continuer...")
+                    print("Cancelled.")
+                input("\nPress Enter to continue...")
 
-            menu.append(("Voir statut du service", do_service_status))
-            menu.append(("Arrêter le service", do_stop_service))
-            menu.append(("Éteindre la machine (shutdown)", do_shutdown))
+            menu.append(("View service status", do_service_status))
 
+            def do_activate_service():
+                """Enable and start the systemd service."""
+                enabled, active = get_service_status()
+                if enabled and active:
+                    print("\n⚠️  Service is already enabled and active.")
+                    input("\nPress Enter to continue...")
+                    return
+                confirm = input("\nEnable and start the rium-dosimeter service? (yes/no) [yes]: ").strip().lower()
+                if confirm in ['', 'yes', 'y']:
+                    subprocess.run(['sudo', 'systemctl', 'enable', SERVICE_NAME], check=False)
+                    subprocess.run(['sudo', 'systemctl', 'start', SERVICE_NAME], check=False)
+                    print("✅ Service enabled and started.")
+                else:
+                    print("Cancelled.")
+                input("\nPress Enter to continue...")
+
+            menu.append(("Activate the service", do_activate_service))
+            menu.append(("Stop the service", do_stop_service))
+            menu.append(("Shutdown machine", do_shutdown))
+
+        def do_update():
+            update_project()  # may os.execv — never returns if update succeeds
+            input("\nPress Enter to continue...")
+
+        menu.append(("Update project (git pull)", do_update))
         menu.append(("Exit", do_exit))
 
         # Print menu

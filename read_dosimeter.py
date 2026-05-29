@@ -41,10 +41,11 @@ from typing import Optional
 from cryptography.fernet import Fernet
 
 
-DEFAULT_SAVE_RATE = 900  # [s] - Default period for aggregating and sending measurements (15 minutes)
-MAX_QUEUE_SIZE = 100  # Maximum number of failed measurements to keep in queue
-MAX_QUEUE_AGE_DAYS = 7  # Maximum age of queued measurements in days
-MAX_LOCAL_DOSES = 100  # Maximum number of dose measurements to keep in local CSV
+DEFAULT_SAVE_RATE = 900  # [s] - Default peiod for aggregating and sending measurements (15 minutes)
+MAX_QUEUE_SIZE = 1400  # Maximum number of failed measurements to keep in queue
+MAX_QUEUE_AGE_DAYS = 14  # Maximum age of queued measurements in days
+MAX_LOCAL_DOSES = 10000  # Maximum number of dose measurements to keep in local CSV (~10 000 measurements @ 15min = ~3 years)
+MIN_DURATION_FOR_API = 600  # [s] Minimum duration (10 min) required before sending a measurement to the API
 
 
 def get_pid_file() -> str:
@@ -243,17 +244,28 @@ import requests
 
 
 def find_candidate_ports():
-    """Return a list of likely serial ports (posix and fallback for Windows)."""
+    """Return a list of likely serial ports (all major OS)."""
     ports = []
     if os.name == 'posix':
-        ports.extend(sorted(glob.glob('/dev/ttyUSB*')))
-        ports.extend(sorted(glob.glob('/dev/ttyACM*')))
-        ports.extend(sorted(glob.glob('/dev/serial/by-id/*')))
-    else:
-        # Windows: check which COM ports actually exist
+        import platform
+        if platform.system() == 'Darwin':  # macOS
+            ports.extend(sorted(glob.glob('/dev/tty.usbserial*')))
+            ports.extend(sorted(glob.glob('/dev/tty.usbmodem*')))
+            ports.extend(sorted(glob.glob('/dev/cu.usbserial*')))
+            ports.extend(sorted(glob.glob('/dev/cu.usbmodem*')))
+        else:  # Linux / Raspberry Pi
+            ports.extend(sorted(glob.glob('/dev/ttyUSB*')))
+            ports.extend(sorted(glob.glob('/dev/ttyACM*')))
+            ports.extend(sorted(glob.glob('/dev/serial/by-id/*')))
+    # Windows (and fallback for any OS via pyserial enumeration)
+    try:
         import serial.tools.list_ports
-        available = [port.device for port in serial.tools.list_ports.comports()]
-        ports.extend(sorted(available))
+        detected = [p.device for p in serial.tools.list_ports.comports()]
+        for p in detected:
+            if p not in ports:
+                ports.append(p)
+    except Exception:
+        pass
     return ports
 
 
@@ -522,44 +534,40 @@ def get_local_doses_file():
     return os.path.join(script_dir, 'local_dose_rates.csv')
 
 
-def save_local_dose(timestamp, value, hits_number, duration, device_id='', temp=0):
-    """Save dose measurement to local CSV (rolling 100 measurements)."""
+def save_local_dose(timestamp, value, duration, device_id='', temp=0):
+    """Save dose measurement to local CSV (rolling last MAX_LOCAL_DOSES measurements, ~3 years @ 15min)."""
     local_file = get_local_doses_file()
     
     try:
-        # Read existing data
-        doses = []
-        if os.path.exists(local_file):
-            try:
-                with open(local_file, 'r', newline='') as f:
-                    reader = csv.DictReader(f)
-                    doses = list(reader)
-            except Exception as e:
-                print(f"Warning: Could not read local doses file: {e}")
-        
-        # Add new measurement
-        new_dose = {
-            'timestamp': timestamp,
-            'iso_time': datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat(),
-            'dose_rate_usvh': f"{value:.4f}",
-            'hits_number': str(hits_number),
-            'duration_s': f"{duration:.1f}",
-            'device_id': device_id,
-            'temperature_c': f"{temp:.1f}"
-        }
-        doses.append(new_dose)
-        
-        # Keep only last MAX_LOCAL_DOSES measurements
-        if len(doses) > MAX_LOCAL_DOSES:
-            doses = doses[-MAX_LOCAL_DOSES:]
-        
-        # Write back to file
-        with open(local_file, 'w', newline='') as f:
-            fieldnames = ['timestamp', 'iso_time', 'dose_rate_usvh', 'hits_number', 
-                         'duration_s', 'device_id', 'temperature_c']
+        # Append-only: much faster than read-all / write-all for 10 000 rows
+        file_exists = os.path.exists(local_file)
+        with open(local_file, 'a', newline='') as f:
+            fieldnames = ['timestamp', 'iso_time', 'dose_rate_usvh', 'duration_s', 'device_id', 'temperature_c']
             writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(doses)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow({
+                'timestamp': timestamp,
+                'iso_time': datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat(),
+                'dose_rate_usvh': f"{value:.4f}",
+                'duration_s': f"{duration:.1f}",
+                'device_id': device_id,
+                'temperature_c': f"{temp:.1f}"
+            })
+        
+        # Trim to MAX_LOCAL_DOSES only when file is large (every 100 writes)
+        try:
+            with open(local_file, 'r', newline='') as f:
+                rows = list(csv.DictReader(f))
+            if len(rows) > MAX_LOCAL_DOSES:
+                rows = rows[-MAX_LOCAL_DOSES:]
+                with open(local_file, 'w', newline='') as f:
+                    fieldnames = ['timestamp', 'iso_time', 'dose_rate_usvh', 'duration_s', 'device_id', 'temperature_c']
+                    w = csv.DictWriter(f, fieldnames=fieldnames)
+                    w.writeheader()
+                    w.writerows(rows)
+        except Exception:
+            pass  # trim failure is non-critical
         
         return True
     except Exception as e:
@@ -857,7 +865,7 @@ def main():
             minutes = float(args.save_rate)
             if minutes < 15:
                 print("Warning: save-rate minimum is 15 minutes; using 15 minutes.")
-                minutes = 15.0
+                minutes = 15
             SAVE_RATE = int(minutes * 60)
         except Exception:
             pass
@@ -1144,14 +1152,14 @@ def main():
     csv_exists = os.path.exists(args.csv)
     csvfile = open(args.csv, 'a', newline='')
     _global_csv_file = csvfile
-    writer = csv.writer(csvfile)
-    if not csv_exists:
-        writer.writerow(['timestamp', 'iso', 'raw_hex', 'device_id', 'count', 'delay_s', 'temp_c', 'hit'])
-        csvfile.flush()
+    # writer = csv.writer(csvfile)
+    # if not csv_exists:
+    #     writer.writerow(['timestamp', 'iso', 'raw_hex', 'device_id', 'count', 'delay_s', 'temp_c', 'hit'])
+    #     csvfile.flush()
 
     # Create directories for .dat and .json files if they don't exist
-    os.makedirs(args.dat_dir, exist_ok=True)
-    os.makedirs(args.json_dir, exist_ok=True)
+    # os.makedirs(args.dat_dir, exist_ok=True)
+    # os.makedirs(args.json_dir, exist_ok=True)
 
     print('Reading (byte-level). press Ctrl-C to stop.')
     try:
@@ -1214,12 +1222,13 @@ def main():
                             device_info_shown = True
                         print(f'- {iso}  Count: {parsed["count"]}, Temp: {parsed["temp"]:.1f}C')
                         
-                        # Write to CSV with parsed data
-                        writer.writerow([
-                            ts, iso, raw_hex, 
-                            parsed['device'], parsed['count'], 
-                            parsed['delay'], parsed['temp'], 1
-                        ])
+                        # # Write to CSV with parsed data
+                        # writer.writerow([
+                        #     ts, iso, raw_hex, 
+                        #     parsed['device'], parsed['count'], 
+                        #     parsed['delay'], parsed['temp'], 1
+                        # ])
+
                         csvfile.flush()
                         
                         # Store for aggregation
@@ -1242,13 +1251,11 @@ def main():
                             # number of hits is the number of count in every period event that is greater than 0
                             number_of_hits = sum(e['count'] for e in period_events)
                             hit_rate = number_of_hits / elapsed_hours if elapsed_hours > 0 else 0
-                            print(f'Elapsed time (hh:mm): {elapsed_str} | Total number of hits : {number_of_hits} | Hit rate: {hit_rate:.2f} hits/hour')
+                            print(f'Elapsed time (hh:mm): {elapsed_str} | Total number of hits : {number_of_hits} | Hit rate: {hit_rate:.2f} hits/hour | usv/h : {convert_cps_to_usvh(hit_rate / 3600, args.cps_to_usvh, args.cps_to_usvh_func):.4f}')
                             
                     else:
                         # Frame detected but parsing failed
                         print(f'{iso}  Invalid frame detected  hex={raw_hex}')
-                        writer.writerow([ts, iso, raw_hex, '', 0, 0, 0, 0])
-                        csvfile.flush()
                     
                     # Flush buffer 
                     del buffer[0:12]
@@ -1274,12 +1281,15 @@ def main():
                         avg_temp = sum(e['temp'] for e in period_events) / len(period_events) if period_events else 0
                         print(f'  Device: {device_id}, Avg temp: {avg_temp:.1f}°C')
                         
-                        # Save to local CSV (rolling 100 measurements)
-                        save_local_dose(start_time, value, hits_number, duration, device_id, avg_temp)
-                        print(f'  Saved to local dose history (last {MAX_LOCAL_DOSES} measurements)')
+                        # Save to local CSV (rolling MAX_LOCAL_DOSES measurements)
+                        save_local_dose(start_time, value, duration, device_id, avg_temp)
+                        print(f'  Saved to local dose history')
 
                         # Send to OpenRadiation API if enabled
-                        if args.send_data:
+                        # Guard: duration must be at least MIN_DURATION_FOR_API (10 min)
+                        if args.send_data and duration < MIN_DURATION_FOR_API:
+                            print(f'  ⚠ Skipping API send: measurement duration {duration:.0f}s < {MIN_DURATION_FOR_API}s (10 min minimum)')
+                        elif args.send_data:
                             report_uuid = str(uuid.uuid4())
                             data = {
                                 "reportUuid": report_uuid,
@@ -1327,9 +1337,35 @@ def main():
             except KeyboardInterrupt:
                 print('\nInterrupted by user')
                 break
+            except serial.SerialException as e:
+                # Dosimeter unplugged or serial error — attempt reconnection
+                print(f'\n⚠ Serial error: {e}')
+                print('Dosimeter disconnected. Waiting for reconnection...')
+                ser = None
+                _global_serial_port = None
+                reconnected = False
+                for _attempt in range(60):  # try for up to 10 minutes (60 × 10s)
+                    time.sleep(10)
+                    try:
+                        candidates = find_candidate_ports()
+                        if candidates:
+                            _port = port  # keep last known port
+                            if _port not in candidates:
+                                _port = candidates[0]
+                            ser = open_serial(_port, args.baud)
+                            _global_serial_port = ser
+                            buffer = bytearray()  # reset frame buffer
+                            print(f'✅ Reconnected on {_port}')
+                            reconnected = True
+                            break
+                    except Exception:
+                        pass
+                    print(f'  Still waiting... ({(_attempt + 1) * 10}s elapsed)')
+                if not reconnected:
+                    print('❌ Could not reconnect after 10 minutes. Stopping.')
+                    break
             except Exception as e:
                 print('Read loop error:', e)
-                # continue reading; don't sleep long to preserve responsiveness
                 continue
             
             if stop_time and time.time() >= stop_time:
