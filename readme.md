@@ -6,7 +6,7 @@
 
 **ASNR Project** — Modernization of Rium GM probes for creating fixed radioactivity measurement stations.
 
-This project reads data in real time from a Rium GM dosimeter via USB serial, calculates the dose rate (µSv/h), and automatically submits measurements to the [OpenRadiation](https://www.openradiation.org/) API. Designed to run as a fixed station on a Raspberry Pi, it is also compatible with Linux, macOS and Windows.
+This project reads data in real time from a Rium GM dosimeter via USB serial, calculates the dose rate (µSv/h), and automatically submits measurements to the [OpenRadiation](https://www.openradiation.org/) API. Designed to run as a fixed station on a Raspberry Pi (primary target), it is also compatible with Linux, macOS and Windows.
 
 **Included files:**
 
@@ -18,8 +18,7 @@ This project reads data in real time from a Rium GM dosimeter via USB serial, ca
 | `config.ini.example` | Configuration example |
 | `requirements.txt` | Python dependencies |
 | `install_dependencies.sh` | Automated installation script (Linux/Raspberry Pi) |
-| `rium-dosimeter.service` | Systemd service for automatic startup (Linux) |
-| `START_WINDOWS.bat` | Windows launch shortcut |
+| `rium-dosimeter.service` | Systemd service for automatic startup (Linux/Raspberry Pi) |
 
 ---
 
@@ -134,6 +133,21 @@ sudo usermod -a -G dialout $USER
 
 To manage the Raspberry Pi without a screen or keyboard from another computer:
 
+```bash
+# Enable SSH
+sudo systemctl enable ssh
+sudo systemctl start ssh
+
+# Connect from another machine (replace <ip> with the Pi's IP address)
+ssh to@<ip>
+```
+
+To find the Raspberry Pi's IP address: `hostname -I`
+
+VNC can be enabled via `sudo raspi-config` → *Interface Options* → *VNC*.
+
+---
+
 ## 3. Using the launcher
 
 The launcher (`launcher.py`) is the main entry point. It checks dependencies on startup, then displays an interactive menu.
@@ -149,19 +163,27 @@ python launcher.py
 ### Launcher menu
 
 ```
-=======================================================================
+======================================================================
   RIUM GM DOSIMETER - Quick Launcher
   ASNR Project
-=======================================================================
+  Service : enabled / active                        ← green / red
+======================================================================
 
-  1. Configure station (first-time setup or reconfigure)
-  2. Start monitoring (local only, no data upload)
-  3. Start monitoring + upload (TEST mode)
-  4. Start monitoring + upload (PRODUCTION mode)
-  5. List available serial ports
-  6. Setup auto-start service (systemd)   ← Linux/Raspberry Pi only
-  7. Exit
+   1. Configure station (first-time setup or reconfigure)
+   2. Start monitoring (local only, no data upload)
+   3. Start monitoring + upload (TEST mode)
+   4. Start monitoring + upload (PRODUCTION mode)
+   5. List available serial ports
+   6. Setup auto-start service (systemd)       ← Linux/Raspberry Pi only
+   7. View service status                      ← Linux/Raspberry Pi only
+   8. Activate the service                     ← Linux/Raspberry Pi only
+   9. Stop the service                         ← Linux/Raspberry Pi only
+  10. Shutdown machine                         ← Linux/Raspberry Pi only
+  11. Update project (git pull)
+  12. Exit
 ```
+
+The banner displays the **current service status in colour** (green = enabled & active, red = otherwise) on Linux/Raspberry Pi.
 
 ---
 
@@ -223,13 +245,14 @@ An explicit confirmation is required before starting.
 Displays all serial ports detected on the machine.
 
 - **Linux/Raspberry Pi**: `/dev/ttyUSB*`, `/dev/ttyACM*`
+- **macOS**: `/dev/tty.usbserial*`, `/dev/cu.usbmodem*`
 - **Windows**: available COM ports
 
 Useful for diagnosing dosimeter detection issues.
 
 ---
 
-### Option 6 — Auto-start service (Linux only)
+### Option 6 — Auto-start service (Linux/Raspberry Pi only)
 
 Configures a **systemd service** so the dosimeter starts automatically on every power-on, including after power cuts.
 
@@ -240,26 +263,105 @@ sudo systemctl enable rium-dosimeter.service
 sudo systemctl start rium-dosimeter.service
 ```
 
-Useful commands after setup:
-
-```bash
-# Service status
-sudo systemctl status rium-dosimeter.service
-
-# Live logs
-journalctl -u rium-dosimeter.service -f
-
-# Stop the service
-sudo systemctl stop rium-dosimeter.service
-
-# Disable auto-start
-sudo systemctl disable rium-dosimeter.service
-```
+**Service configuration (`rium-dosimeter.service`):**
+- Runs as `root`
+- Starts after `multi-user.target` (`After=` + `Wants=`)
+- `Restart=on-failure` — restarts on crash but **not** on clean exit (`exit 0`)
+- If the USB dosimeter is not detected at boot: 3 scan attempts × 15 s delay, then clean stop (`exit 0`) and waits for next boot
 
 ---
 
-## Contributors
+### Option 7 — View service status (Linux/Raspberry Pi only)
 
+Displays the full `systemctl status` output and the last 30 lines of `journalctl` logs.
+
+---
+
+### Option 8 — Activate the service (Linux/Raspberry Pi only)
+
+Enables and starts the service (`systemctl enable` + `systemctl start`) with confirmation.
+
+---
+
+### Option 9 — Stop the service (Linux/Raspberry Pi only)
+
+Stops the running service (`systemctl stop`) with confirmation.
+
+---
+
+### Option 10 — Shutdown machine (Linux/Raspberry Pi only)
+
+Cleanly shuts down the Raspberry Pi (`shutdown -h now`) with confirmation.
+
+---
+
+### Option 11 — Update project (git pull)
+
+Pulls the latest version of the project from the git remote. Handles the full update lifecycle safely:
+
+1. Verifies `git` is installed and the directory is a git repository
+2. Shows current branch and last commit
+3. **Stops the service** if running (prevents replacing files mid-execution)
+4. Runs `git pull` — downloads updated scripts and any new files
+5. Displays the list of changed files
+6. **Restarts the service** if it was stopped
+7. **Reloads `launcher.py`** in-place via `os.execv()` — the new version is active immediately without manual restart
+
+> **Prerequisites on Raspberry Pi**: `sudo apt install git` and a configured remote (`git remote -v`). For private repositories, configure an SSH key or personal access token.
+
+---
+
+## 4. Local data storage
+
+All dose rate measurements are saved locally in `local_dose_rates.csv` (rolling, last **10 000 measurements** ≈ ~3 years at 15 min/measurement):
+
+| Column | Description |
+|---|---|
+| `timestamp` | Unix timestamp |
+| `iso_time` | ISO 8601 UTC datetime |
+| `dose_rate_usvh` | Dose rate in µSv/h |
+| `duration_s` | Measurement window duration (s) |
+| `device_id` | Rium GM device identifier |
+| `temperature_c` | Average temperature (°C) |
+
+Failed API submissions are queued in `pending_measurements.json` (max 100 entries, 7-day retention) and retried automatically on the next successful connection.
+
+**Minimum duration guard**: a measurement must span at least **10 minutes** of actual data to be submitted to the API (prevents spurious short-window submissions after restarts).
+
+---
+
+## 5. Robustness
+
+### USB disconnection during operation
+If the dosimeter is unplugged while running, the script attempts reconnection automatically:
+- Scans for USB ports every **10 seconds** for up to **10 minutes** (60 attempts)
+- Reconnects on the last known port or the first available port
+- Resets the frame buffer and resumes normally
+- If no reconnection after 10 minutes: clean stop (service restarts at next boot)
+
+### Network loss during operation
+- 3 retry attempts per submission with exponential backoff (5 s / 10 s / 15 s)
+- Failed measurements queued locally and retried on the next successful send
+- Local CSV recording continues uninterrupted regardless of network state
+
+### Service not restarting immediately on failure
+The service uses `Restart=on-failure`. A clean exit (`exit 0`, e.g. USB not found at boot) does **not** trigger an immediate restart — the service waits for the next system boot. Crashes (non-zero exit) do trigger a restart after `RestartSec=10`.
+
+---
+
+## 6. Platform compatibility
+
+| Feature | Windows | macOS | Linux/Raspberry Pi |
+|---|---|---|---|
+| USB serial reading | ✅ | ✅ | ✅ |
+| Port auto-detection | ✅ COM* | ✅ tty.usbserial* | ✅ ttyUSB*/ttyACM* |
+| API upload | ✅ | ✅ | ✅ |
+| Local CSV storage | ✅ | ✅ | ✅ |
+| Encrypted password storage | ✅ | ✅ | ✅ |
+| USB reconnection | ✅ | ✅ | ✅ |
+| git pull update | ✅ | ✅ | ✅ |
+| Systemd service management | ❌ | ❌ | ✅ |
+| Shutdown option | ❌ | ❌ | ✅ |
 - E. Martinet-Gerphagnon, PhD Student, ASNR × Institut Curie
 - A. Dreux, Data Engineer in Dosimetry, ASNR
 
