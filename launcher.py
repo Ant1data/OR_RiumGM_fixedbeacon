@@ -296,8 +296,8 @@ Wants=multi-user.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/home/{getpass.getuser()}/OR_RiumGM_fixedbeacon
-ExecStart=/usr/bin/python3 /home/{getpass.getuser()}/OR_RiumGM_fixedbeacon/read_dosimeter.py --send-data --production
+WorkingDirectory={script_dir}
+ExecStart=/usr/bin/python3 {os.path.join(script_dir, 'read_dosimeter.py')} --send-data --production
 Restart=on-failure
 RestartSec=10
 
