@@ -16,7 +16,7 @@ import importlib.util
 import time
 import getpass
 
-PASSWORD_FILE = '.dosimeter_credentials'  # kept for legacy reference, not actively used
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SAVE_RATE_MINUTES = 30
 MINIMUM_SAVE_RATE_MINUTES = 15
 
@@ -24,9 +24,8 @@ def get_stored_password(username):
     """Retrieve a stored password from encrypted file."""
     try:
         from cryptography.fernet import Fernet
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        key_file = os.path.join(script_dir, '.dosimeter_key')
-        password_file = os.path.join(script_dir, f'.dosimeter_{username}')
+        key_file = os.path.join(SCRIPT_DIR, '.dosimeter_key')
+        password_file = os.path.join(SCRIPT_DIR, f'.dosimeter_{username}')
 
         if not os.path.exists(key_file) or not os.path.exists(password_file):
             return None
@@ -52,9 +51,8 @@ def set_stored_password(username, password):
     """Store a password securely in encrypted file."""
     try:
         from cryptography.fernet import Fernet
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        key_file = os.path.join(script_dir, '.dosimeter_key')
-        password_file = os.path.join(script_dir, f'.dosimeter_{username}')
+        key_file = os.path.join(SCRIPT_DIR, '.dosimeter_key')
+        password_file = os.path.join(SCRIPT_DIR, f'.dosimeter_{username}')
 
         # Generate or load encryption key
         if not os.path.exists(key_file):
@@ -197,7 +195,19 @@ def install_dependencies(packages):
                     return True
                 else:
                     print("\n❌ Installation failed.")
-                    return False    
+                    return False
+        else:
+            # Non-Linux platform: install directly with pip
+            cmd = [sys.executable, '-m', 'pip', 'install'] + packages
+            print(f"Running: {' '.join(cmd)}\n")
+            result = subprocess.run(cmd, check=False)
+
+            if result.returncode == 0:
+                print("\n✅ Dependencies installed successfully!")
+                return True
+            else:
+                print("\n❌ Installation failed.")
+                return False
     except Exception as e:
         print(f"\n❌ Error during installation: {e}")
         return False
@@ -258,8 +268,7 @@ def setup_systemd_service():
         print("\n⚠️  Systemd service is only available on Linux/Raspberry Pi.")
         return False
     
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    service_file_src = os.path.join(script_dir, 'rium-dosimeter.service')
+    service_file_src = os.path.join(SCRIPT_DIR, 'rium-dosimeter.service')
     service_file_dst = '/etc/systemd/system/rium-dosimeter.service'
     
     print("\n" + "="*70)
@@ -296,8 +305,8 @@ Wants=multi-user.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory={script_dir}
-ExecStart=/usr/bin/python3 {os.path.join(script_dir, 'read_dosimeter.py')} --send-data --production
+WorkingDirectory={SCRIPT_DIR}
+ExecStart=/usr/bin/python3 {os.path.join(SCRIPT_DIR, 'read_dosimeter.py')} --send-data --production
 Restart=on-failure
 RestartSec=10
 
@@ -402,7 +411,6 @@ def update_project():
     - Restarts the service if it was stopped.
     - Re-executes launcher.py so the new version is loaded immediately.
     """
-    script_dir = os.path.dirname(os.path.abspath(__file__))
 
     print("\n" + "="*70)
     print("  UPDATE PROJECT (git pull)")
@@ -417,21 +425,21 @@ def update_project():
 
     # 2. Check we are inside a git repository
     repo_check = subprocess.run(
-        ['git', '-C', script_dir, 'rev-parse', '--is-inside-work-tree'],
+        ['git', '-C', SCRIPT_DIR, 'rev-parse', '--is-inside-work-tree'],
         capture_output=True, text=True
     )
     if repo_check.returncode != 0:
-        print(f"\n❌ {script_dir} is not a git repository.")
+        print(f"\n❌ {SCRIPT_DIR} is not a git repository.")
         print("   Clone the project first: git clone <url>")
         return
 
     # 3. Show current state
     branch = subprocess.run(
-        ['git', '-C', script_dir, 'rev-parse', '--abbrev-ref', 'HEAD'],
+        ['git', '-C', SCRIPT_DIR, 'rev-parse', '--abbrev-ref', 'HEAD'],
         capture_output=True, text=True
     ).stdout.strip()
     last_commit = subprocess.run(
-        ['git', '-C', script_dir, 'log', '-1', '--oneline'],
+        ['git', '-C', SCRIPT_DIR, 'log', '-1', '--oneline'],
         capture_output=True, text=True
     ).stdout.strip()
     print(f"\n  Branch  : {branch}")
@@ -456,7 +464,7 @@ def update_project():
     print("\n→ Running git pull...")
     print("-" * 70)
     pull = subprocess.run(
-        ['git', '-C', script_dir, 'pull'],
+        ['git', '-C', SCRIPT_DIR, 'pull'],
         text=True
     )
     print("-" * 70)
@@ -472,7 +480,7 @@ def update_project():
 
     # 6. Show what changed
     new_commit = subprocess.run(
-        ['git', '-C', script_dir, 'log', '-1', '--oneline'],
+        ['git', '-C', SCRIPT_DIR, 'log', '-1', '--oneline'],
         capture_output=True, text=True
     ).stdout.strip()
     if new_commit == last_commit:
@@ -480,7 +488,7 @@ def update_project():
     else:
         print(f"\n✅ Updated to: {new_commit}")
         changed = subprocess.run(
-            ['git', '-C', script_dir, 'diff', '--name-only', last_commit, 'HEAD'],
+            ['git', '-C', SCRIPT_DIR, 'diff', '--name-only', last_commit, 'HEAD'],
             capture_output=True, text=True
         ).stdout.strip()
         if changed:
@@ -569,8 +577,7 @@ def get_float(prompt, default=None, required=False):
 
 def run_configuration_wizard():
     """Interactive configuration wizard."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    config_file = os.path.join(script_dir, 'config.ini')
+    config_file = os.path.join(SCRIPT_DIR, 'config.ini')
     
     print("\n" + "="*70)
     print("  CONFIGURATION WIZARD")
@@ -636,7 +643,6 @@ def run_configuration_wizard():
     print("Enter your OpenRadiation account password.")
     print()
     
-    current_password = None  # noqa: F841 — kept for potential future use
     credential_key = None
     keyring_password = None  # initialise avant utilisation
     if existing_config.get('user_id'):
@@ -924,11 +930,10 @@ def check_openradiation_api(config_file):
 
 
 def main():
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    main_script = os.path.join(script_dir, 'read_dosimeter.py')
+    main_script = os.path.join(SCRIPT_DIR, 'read_dosimeter.py')
     
     # Load configuration (to get save_rate) and check dependencies on first run
-    config_file = os.path.join(script_dir, 'config.ini')
+    config_file = os.path.join(SCRIPT_DIR, 'config.ini')
     cfg = configparser.ConfigParser()
     if os.path.exists(config_file):
         try:
