@@ -1112,12 +1112,23 @@ def main():
             menu.append(("Setup auto-start service (systemd)", do_setup_service))
 
             def do_service_status():
-                """Display full systemd service status."""
+                """Display full systemd service status then stream live logs."""
                 print("\n→ Systemd service status")
                 print("-" * 70)
                 subprocess.run(['sudo', 'systemctl', 'status', SERVICE_NAME, '--no-pager'])
                 print()
-                subprocess.run(['journalctl', '-u', SERVICE_NAME, '-n', '30', '--no-pager'])
+                print("-" * 70)
+                print("  LIVE LOGS (Ctrl+C to return to menu)")
+                print("-" * 70)
+                try:
+                    proc = subprocess.Popen(
+                        ['journalctl', '-u', SERVICE_NAME, '-n', '30', '-f', '--no-pager'],
+                        stdout=None, stderr=None
+                    )
+                    proc.wait()
+                except KeyboardInterrupt:
+                    proc.terminate()
+                    print("\n\n→ Live log stopped.")
                 input("\nPress Enter to continue...")
 
             def do_stop_service():
