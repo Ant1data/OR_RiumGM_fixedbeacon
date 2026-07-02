@@ -20,10 +20,23 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SAVE_RATE_MINUTES = 30
 MINIMUM_SAVE_RATE_MINUTES = 15
 
+import importlib as _importlib
+
+def _get_fernet_class():
+    """Load cryptography.fernet.Fernet dynamically to avoid hard import errors."""
+    try:
+        module = _importlib.import_module('cryptography.fernet')
+        return module.Fernet
+    except Exception:
+        return None
+
+
 def get_stored_password(username):
     """Retrieve a stored password from encrypted file."""
     try:
-        from cryptography.fernet import Fernet
+        Fernet = _get_fernet_class()
+        if Fernet is None:
+            return None
         key_file = os.path.join(SCRIPT_DIR, '.dosimeter_key')
         password_file = os.path.join(SCRIPT_DIR, f'.dosimeter_{username}')
 
@@ -50,7 +63,9 @@ def get_stored_password(username):
 def set_stored_password(username, password):
     """Store a password securely in encrypted file."""
     try:
-        from cryptography.fernet import Fernet
+        Fernet = _get_fernet_class()
+        if Fernet is None:
+            return False
         key_file = os.path.join(SCRIPT_DIR, '.dosimeter_key')
         password_file = os.path.join(SCRIPT_DIR, f'.dosimeter_{username}')
 
@@ -195,19 +210,7 @@ def install_dependencies(packages):
                     return True
                 else:
                     print("\n❌ Installation failed.")
-                    return False
-        else:
-            # Non-Linux platform: install directly with pip
-            cmd = [sys.executable, '-m', 'pip', 'install'] + packages
-            print(f"Running: {' '.join(cmd)}\n")
-            result = subprocess.run(cmd, check=False)
-
-            if result.returncode == 0:
-                print("\n✅ Dependencies installed successfully!")
-                return True
-            else:
-                print("\n❌ Installation failed.")
-                return False
+                    return False    
     except Exception as e:
         print(f"\n❌ Error during installation: {e}")
         return False
@@ -268,6 +271,7 @@ def setup_systemd_service():
         print("\n⚠️  Systemd service is only available on Linux/Raspberry Pi.")
         return False
     
+
     service_file_src = os.path.join(SCRIPT_DIR, 'rium-dosimeter.service')
     service_file_dst = '/etc/systemd/system/rium-dosimeter.service'
     
@@ -411,6 +415,7 @@ def update_project():
     - Restarts the service if it was stopped.
     - Re-executes launcher.py so the new version is loaded immediately.
     """
+
 
     print("\n" + "="*70)
     print("  UPDATE PROJECT (git pull)")
@@ -577,6 +582,7 @@ def get_float(prompt, default=None, required=False):
 
 def run_configuration_wizard():
     """Interactive configuration wizard."""
+
     config_file = os.path.join(SCRIPT_DIR, 'config.ini')
     
     print("\n" + "="*70)
@@ -643,6 +649,7 @@ def run_configuration_wizard():
     print("Enter your OpenRadiation account password.")
     print()
     
+    current_password = None  # noqa: F841 — kept for potential future use
     credential_key = None
     keyring_password = None  # initialise avant utilisation
     if existing_config.get('user_id'):
@@ -819,8 +826,8 @@ def find_candidate_ports():
         ports.extend(sorted(glob.glob('/dev/serial/by-id/*')))
     else:
         try:
-            import serial.tools.list_ports
-            available = [port.device for port in serial.tools.list_ports.comports()]
+            list_ports = importlib.import_module('serial.tools.list_ports')
+            available = [port.device for port in list_ports.comports()]
             ports.extend(sorted(available))
         except ImportError:
             print("  \u26a0\ufe0f  pyserial not installed — cannot list COM ports on Windows.")
@@ -930,6 +937,7 @@ def check_openradiation_api(config_file):
 
 
 def main():
+
     main_script = os.path.join(SCRIPT_DIR, 'read_dosimeter.py')
     
     # Load configuration (to get save_rate) and check dependencies on first run
