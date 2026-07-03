@@ -1,3 +1,11 @@
+# Core dependencies for Rium GM Dosimeter Reader
+# Requires Python 3.7+
+
+# Serial port communication
 pyserial>=3.5
-requests>=2.28.0
-cryptography>=3.4.0
+
+# HTTP requests to OpenRadiation API
+requests>=2.31.0
+
+# Password encryption and decryption
+cryptography>=41.0.0
