@@ -26,7 +26,7 @@ This project reads data in real time from a Rium GM dosimeter via USB serial, ca
 
 Before installing dependencies, you need to retrieve the project files. Two methods are available:
 
-### Method 1 — Via command line (requires an internet connection)
+### Method 1 — Using the command line (requires an internet connection)
 
 If the machine has internet access, use **Git** to clone the repository directly:
 
@@ -42,7 +42,7 @@ cd OR_RiumGM_fixedbeacon
 
 ---
 
-### Method 2 — Via USB key (offline transfer)
+### Method 2 — Using a USB drive (offline transfer)
 
 If the machine has no internet access (isolated network, Raspberry Pi without Wi-Fi, etc.):
 
@@ -88,8 +88,6 @@ cryptography >= 3.4.0
    python launcher.py
    ```
 
-   Or double-click `START_WINDOWS.bat`.
-
 > The launcher automatically detects missing dependencies and offers to install them on startup.
 
 ---
@@ -111,7 +109,7 @@ This script installs system packages via `apt`, configures serial port permissio
 sudo apt update && sudo apt install -y python3-serial python3-requests python3-cryptography
 ```
 
-**Method 3 — Via pip**
+**Method 3 — Using pip**
 
 ```bash
 pip3 install -r requirements.txt
@@ -138,8 +136,8 @@ To manage the Raspberry Pi without a screen or keyboard from another computer:
 sudo systemctl enable ssh
 sudo systemctl start ssh
 
-# Connect from another machine (replace <ip> with the Pi's IP address)
-ssh to@<ip>
+# Connect from another machine (replace <user> and <ip>)
+ssh <user>@<ip>
 ```
 
 To find the Raspberry Pi's IP address: `hostname -I`
@@ -183,7 +181,7 @@ python launcher.py
   12. Exit
 ```
 
-The banner displays the **current service status in colour** (green = enabled & active, red = otherwise) on Linux/Raspberry Pi.
+The banner displays the **current service status in color** (green = enabled & active, red = otherwise) on Linux/Raspberry Pi.
 
 ---
 
@@ -217,12 +215,12 @@ Press `Ctrl+C` to stop.
 
 ### Option 3 — Monitoring + upload in TEST mode
 
-First runs a 30-second local test, then starts uploading to OpenRadiation **in test mode** (data flagged as test, not counted in production).
+Runs two short checks in sequence: a 30-second local test, then a 30-second upload test to OpenRadiation **in test mode** (data flagged as test, not counted in production).
 
 Automatic sequence:
 
 1. 30 s local test — verifies dosimeter detection and reading
-2. If the test passes: starts uploading in test mode
+2. If the first test passes: runs a 30 s API upload test in test mode
 3. On Linux: offers to enable the systemd service for automatic startup
 
 ---
@@ -273,7 +271,7 @@ sudo systemctl start rium-dosimeter.service
 
 ### Option 7 — View service status (Linux/Raspberry Pi only)
 
-Displays the full `systemctl status` output and the last 30 lines of `journalctl` logs.
+Displays the full `systemctl status` output, then streams live `journalctl` logs (last 30 lines + follow mode) until `Ctrl+C`.
 
 ---
 
@@ -324,7 +322,7 @@ All dose rate measurements are saved locally in `local_dose_rates.csv` (rolling,
 | `device_id` | Rium GM device identifier |
 | `temperature_c` | Average temperature (°C) |
 
-Failed API submissions are queued in `pending_measurements.json` (max 100 entries, 7-day retention) and retried automatically on the next successful connection.
+Failed API submissions are queued in `pending_measurements.json` (max **1400** entries, **14-day** retention) and retried automatically on the next successful connection.
 
 **Minimum duration guard**: a measurement must span at least **10 minutes** of actual data to be submitted to the API (prevents spurious short-window submissions after restarts).
 
