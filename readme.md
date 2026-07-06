@@ -65,7 +65,7 @@ Required Python dependencies (`requirements.txt`) :
 
 ```
 pyserial >= 3.5
-requests >= 2.28.0
+requests >= 2.31.0
 cryptography >= 3.4.0
 ```
 

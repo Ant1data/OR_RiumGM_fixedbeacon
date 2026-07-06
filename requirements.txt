@@ -8,4 +8,4 @@ pyserial>=3.5
 requests>=2.31.0
 
 # Password encryption and decryption
-cryptography>=41.0.0
+cryptography>=4.1.0
