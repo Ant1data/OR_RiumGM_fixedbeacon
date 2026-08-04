@@ -272,7 +272,6 @@ def setup_systemd_service():
         return False
     
 
-    service_file_src = os.path.join(SCRIPT_DIR, 'rium-dosimeter.service')
     service_file_dst = '/etc/systemd/system/rium-dosimeter.service'
     
     print("\n" + "="*70)
@@ -297,11 +296,17 @@ def setup_systemd_service():
         return False
     
     try:
-        # Check if service file exists — generate one if missing
-        if not os.path.exists(service_file_src):
-            print(f"\n\u26a0\ufe0f  Service file not found: {service_file_src}")
-            print("\u2192 Generating a default service file...")
-            service_content = f"""[Unit]
+        workdir = os.path.realpath(SCRIPT_DIR)
+        reader_script = os.path.realpath(os.path.join(workdir, 'read_dosimeter.py'))
+
+        if not os.path.isfile(reader_script):
+            print(f"\n❌ Script not found: {reader_script}")
+            return False
+
+        escaped_workdir = workdir.replace('\\', '\\\\').replace('"', '\\"')
+        escaped_reader_script = reader_script.replace('\\', '\\\\').replace('"', '\\"')
+
+        service_content = f"""[Unit]
 Description=Rium GM Dosimeter Reader
 After=multi-user.target
 Wants=multi-user.target
@@ -309,27 +314,22 @@ Wants=multi-user.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory={SCRIPT_DIR}
-ExecStart=/usr/bin/python3 {os.path.join(SCRIPT_DIR, 'read_dosimeter.py')} --send-data --production
+WorkingDirectory=\"{escaped_workdir}\"
+ExecStart=/usr/bin/python3 \"{escaped_reader_script}\" --send-data --production
 Restart=on-failure
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 """
-            with open(service_file_src, 'w') as f:
-                f.write(service_content)
-            print(f"\u2705 Service file generated: {service_file_src}")
-            print("\u2139\ufe0f  Review and edit it if needed before proceeding.")
-            review = input("\nContinue with this service file? (yes/no) [yes]: ").strip().lower()
-            if review not in ['', 'yes', 'y']:
-                print("Service setup cancelled. Edit the file and try again.")
-                return False
-        
+
         print("\n→ Installing service file...")
-        # Copy service file
-        result = subprocess.run(['sudo', 'cp', service_file_src, service_file_dst], check=True)
-        print("✅ Service file copied")
+        temp_service_file = '/tmp/rium-dosimeter.service'
+        with open(temp_service_file, 'w', encoding='utf-8') as f:
+            f.write(service_content)
+
+        subprocess.run(['sudo', 'cp', temp_service_file, service_file_dst], check=True)
+        print("✅ Service file generated and copied")
         
         # Reload systemd
         print("\n→ Reloading systemd...")
@@ -356,6 +356,7 @@ WantedBy=multi-user.target
         print("✅ Systemd service setup complete!")
         print("="*70)
         print()
+        print(f"Configured path: {workdir}")
         print("Useful commands:")
         print("  • Check status:  sudo systemctl status rium-dosimeter.service")
         print("  • View logs:     journalctl -u rium-dosimeter.service -f")
@@ -369,7 +370,7 @@ WantedBy=multi-user.target
     except subprocess.CalledProcessError as e:
         print(f"\n❌ Error setting up service: {e}")
         print("\nYou can setup manually with:")
-        print(f"  sudo cp {service_file_src} {service_file_dst}")
+        print(f"  sudo cp /tmp/rium-dosimeter.service {service_file_dst}")
         print("  sudo systemctl daemon-reload")
         print("  sudo systemctl enable rium-dosimeter.service")
         print("  sudo systemctl start rium-dosimeter.service")

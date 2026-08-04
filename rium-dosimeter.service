@@ -6,8 +6,8 @@ Wants=multi-user.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/home/username/OR_RiumGM_fixedbeacon
-ExecStart=/usr/bin/python3 /home/username/OR_RiumGM_fixedbeacon/read_dosimeter.py --send-data --production
+WorkingDirectory=%h/OR_RiumGM_fixedbeacon
+ExecStart=/usr/bin/python3 %h/OR_RiumGM_fixedbeacon/read_dosimeter.py --send-data --production
 Restart=on-failure
 RestartSec=10
 
