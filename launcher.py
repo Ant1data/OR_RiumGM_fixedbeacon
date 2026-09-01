@@ -600,6 +600,7 @@ def run_configuration_wizard():
             'api_key': config.get('DEFAULT', 'api_key', fallback=''),
             'username': config.get('DEFAULT', 'username', fallback=''),
             'password': config.get('DEFAULT', 'password', fallback=''),
+            'apparatus_id': config.get('DEFAULT', 'apparatus_id', fallback=''),
             'latitude': config.get('DEFAULT', 'latitude', fallback=''),
             'longitude': config.get('DEFAULT', 'longitude', fallback=''),
             'tags': config.get('DEFAULT', 'tags', fallback=''),
@@ -715,6 +716,23 @@ def run_configuration_wizard():
         longitude = get_float("Longitude (e.g., 2.3522) (press Enter to skip)", required=False)
     print()
     
+    # Apparatus ID (unique device identifier)
+    print("2.5️⃣  Device Identification (Apparatus ID)")
+    print("-" * 70)
+    print("Enter a unique identifier for this Rium GM device.")
+    print("Common identifiers:")
+    print("  • MAC address of the device (e.g., 00:1A:2B:3C:4D:5E)")
+    print("  • Serial number of the device")
+    print("  • Any unique string identifying this particular device")
+    print()
+    
+    current_apparatus_id = existing_config.get('apparatus_id', '')
+    if current_apparatus_id:
+        print(f"Current Apparatus ID: {current_apparatus_id}")
+    
+    apparatus_id = get_input("Apparatus ID (press Enter to skip)", default=current_apparatus_id, required=False)
+    print()
+    
     # Tags
     print("3️⃣  Station Tags (Optional)")
     print("-" * 70)
@@ -766,6 +784,7 @@ def run_configuration_wizard():
     print(f"API Key: {masked_api}")
     print(f"Username/User ID: {user_id if user_id else 'Not set'}")
     print(f"Password: {'Stored in encrypted file' if password else 'Not set'}")
+    print(f"Apparatus ID: {apparatus_id if apparatus_id else 'Not set'}")
     location_str = f"{latitude}, {longitude}" if latitude and longitude else "Not set"
     print(f"Location: {location_str}")
     print(f"Tags: {tags if tags else 'None'}")
@@ -780,6 +799,7 @@ def run_configuration_wizard():
         config['DEFAULT'] = {
             'api_key': api_key if api_key else '',
             'username': username if username else '',
+            'apparatus_id': apparatus_id if apparatus_id else '',
             'latitude': str(latitude) if latitude else current_latitude,
             'longitude': str(longitude) if longitude else current_longitude,
             'tags': tags if tags else '',
