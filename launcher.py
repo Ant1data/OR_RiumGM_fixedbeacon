@@ -466,18 +466,42 @@ def update_project():
             service_was_active = True
             print("  ✅ Service stopped.")
 
-    # 5. git pull
-    print("\n→ Running git pull...")
+    # 5. git pull from main branch with rebase
+    print("\n→ Running git pull from main branch...")
     print("-" * 70)
+    
+    # First, try to checkout main if not already on it
+    if branch != 'main':
+        print(f"  Switching from '{branch}' to 'main'...")
+        checkout = subprocess.run(
+            ['git', '-C', SCRIPT_DIR, 'checkout', 'main'],
+            capture_output=True, text=True
+        )
+        if checkout.returncode != 0:
+            print(f"  ⚠️  Could not switch to main branch: {checkout.stderr}")
+            print("  Attempting pull anyway...")
+    
+    # Pull with rebase to avoid merge commits
     pull = subprocess.run(
-        ['git', '-C', SCRIPT_DIR, 'pull'],
+        ['git', '-C', SCRIPT_DIR, 'pull', '--rebase', 'origin', 'main'],
         text=True
     )
     print("-" * 70)
 
     if pull.returncode != 0:
         print("\n❌ git pull failed (see output above).")
-        print("   Possible causes: merge conflict, no remote configured, no internet.")
+        print("\n   Possible causes:")
+        print("     • No internet connection")
+        print("     • Remote not configured (check: git remote -v)")
+        print("     • Merge conflict (run: git status)")
+        print("     • Local changes not committed (run: git status)")
+        print("     • Authentication issue (SSH key or credentials)")
+        print("\n   Try these fixes:")
+        print("     1. Check internet connection")
+        print("     2. Run: git status")
+        print("     3. Commit local changes or stash them")
+        print("     4. Try: git fetch origin")
+        print("     5. Try: git reset --hard origin/main")
         # Restart service even if pull failed
         if service_was_active and is_linux():
             print("\n→ Restarting service (pull failed, restoring previous state)...")
@@ -716,21 +740,50 @@ def run_configuration_wizard():
         longitude = get_float("Longitude (e.g., 2.3522) (press Enter to skip)", required=False)
     print()
     
-    # Apparatus ID (unique device identifier)
+    # Apparatus ID (unique device identifier) - AUTO-DETECTED
     print("2.5️⃣  Device Identification (Apparatus ID)")
     print("-" * 70)
-    print("Enter a unique identifier for this Rium GM device.")
-    print("Common identifiers:")
-    print("  • MAC address of the device (e.g., 00:1A:2B:3C:4D:5E)")
-    print("  • Serial number of the device")
-    print("  • Any unique string identifying this particular device")
+    print("Detecting Rium GM USB device...")
     print()
     
-    current_apparatus_id = existing_config.get('apparatus_id', '')
-    if current_apparatus_id:
-        print(f"Current Apparatus ID: {current_apparatus_id}")
+    # Try to detect apparatus ID from connected Rium GM
+    detected_apparatus_id = None
+    try:
+        # Import the detection function
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from read_dosimeter import get_apparatus_id_from_port, find_serial_ports
+        
+        # Find available serial ports
+        ports = find_serial_ports()
+        if ports:
+            port = ports[0]  # Use first available port
+            detected_apparatus_id = get_apparatus_id_from_port(port)
+            if detected_apparatus_id:
+                print(f"✓ Auto-detected Apparatus ID: {detected_apparatus_id}")
+                print(f"  (Detected from USB device on port: {port})")
+            else:
+                print(f"⚠ Could not detect USB serial on port {port}")
+                print(f"  Will use fallback ID")
+        else:
+            print("⚠ No serial ports detected - is Rium GM connected?")
+    except ImportError:
+        print("⚠ Could not import detection functions")
+    except Exception as e:
+        print(f"⚠ Detection failed: {e}")
     
-    apparatus_id = get_input("Apparatus ID (press Enter to skip)", default=current_apparatus_id, required=False)
+    # Use detected ID, or generate fallback
+    if detected_apparatus_id:
+        apparatus_id = detected_apparatus_id
+        print()
+    else:
+        # Fallback: generate from timestamp
+        apparatus_id = f"RIUM_GM_{int(time.time())}"
+        print(f"  Fallback ID generated: {apparatus_id}")
+        print()
+    
+    print("ℹ️  This ID uniquely identifies your Rium GM device")
+    print("    and will be sent with every measurement to OpenRadiation.")
     print()
     
     # Tags
