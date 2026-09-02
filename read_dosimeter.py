@@ -187,6 +187,74 @@ def check_existing_pid_file() -> Optional[int]:
     return None
 
 
+def normalize_mac_address(raw_mac: Optional[str]) -> Optional[str]:
+    """Normalize a MAC address to uppercase colon-separated format."""
+    if not raw_mac:
+        return None
+
+    compact = re.sub(r'[^0-9A-Fa-f]', '', raw_mac)
+    if len(compact) != 12:
+        return None
+
+    normalized = ':'.join(compact[i:i+2].upper() for i in range(0, 12, 2))
+    if normalized == '00:00:00:00:00:00':
+        return None
+    return normalized
+
+
+def get_usb_device_mac(port: str) -> Optional[str]:
+    """
+    Extract device MAC address from a serial port when exposed by the OS.
+
+    This is primarily intended for Linux/Raspberry Pi deployments where the
+    Rium GM exposes an address in sysfs.
+    """
+    if not port or not sys.platform.startswith('linux'):
+        return None
+
+    try:
+        resolved_port = os.path.realpath(port)
+        tty_name = os.path.basename(resolved_port)
+        tty_root = Path('/sys/class/tty') / tty_name
+        candidate_paths = []
+
+        for start_path in (tty_root, tty_root / 'device'):
+            if not start_path.exists():
+                continue
+
+            resolved_start = Path(os.path.realpath(str(start_path)))
+            candidate_dirs = [resolved_start, *list(resolved_start.parents[:6])]
+            for directory in candidate_dirs:
+                candidate_paths.append(directory / 'address')
+
+                net_dir = directory / 'net'
+                if net_dir.exists():
+                    try:
+                        for iface_dir in net_dir.iterdir():
+                            candidate_paths.append(iface_dir / 'address')
+                    except Exception:
+                        pass
+
+        seen = set()
+        for candidate_path in candidate_paths:
+            candidate_str = str(candidate_path)
+            if candidate_str in seen or not candidate_path.exists():
+                continue
+            seen.add(candidate_str)
+
+            try:
+                with open(candidate_path, 'r', encoding='utf-8') as f:
+                    mac_address = normalize_mac_address(f.read().strip())
+                    if mac_address:
+                        return mac_address
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return None
+
+
 def get_usb_device_serial(port: str) -> Optional[str]:
     """
     Extract USB device serial number from a serial port.
@@ -300,7 +368,7 @@ def get_usb_device_serial(port: str) -> Optional[str]:
 
 def get_apparatus_id_from_port(port: str, fallback_id: Optional[str] = None) -> str:
     """
-    Get apparatus ID from USB device serial or use fallback.
+    Get apparatus ID from detected device MAC when available, else USB serial, or use fallback.
     
     Args:
         port: Serial port path
@@ -309,6 +377,10 @@ def get_apparatus_id_from_port(port: str, fallback_id: Optional[str] = None) -> 
     Returns:
         Apparatus ID string
     """
+    device_mac = get_usb_device_mac(port)
+    if device_mac:
+        return device_mac
+
     usb_serial = get_usb_device_serial(port)
     
     if usb_serial:
@@ -995,9 +1067,8 @@ def main():
         sys.exit(1)
     
     # Get apparatus_id from argument or config file
-    apparatus_id = args.apparatus_id
-    if not apparatus_id and config:
-        apparatus_id = config.get('apparatus_id', None)
+    configured_apparatus_id = config.get('apparatus_id', None) if config else None
+    apparatus_id = args.apparatus_id or configured_apparatus_id
     
     # Auto-detection will happen after port is opened (see below)
 
@@ -1270,12 +1341,15 @@ def main():
             ser = open_serial(port, args.baud)
             print(f'Connected successfully!')
             
-            # Auto-detect apparatus_id from USB device if not already provided
-            if not apparatus_id:
-                detected_id = get_apparatus_id_from_port(port)
+            # Prefer detected device MAC for apparatusId, unless explicitly overridden by CLI
+            if not args.apparatus_id:
+                detected_id = get_apparatus_id_from_port(port, fallback_id=configured_apparatus_id)
                 if detected_id:
                     apparatus_id = detected_id
-                    print(f'✓ Auto-detected apparatus ID: {apparatus_id}')
+                    if normalize_mac_address(detected_id):
+                        print(f'✓ Auto-detected apparatus ID (MAC): {apparatus_id}')
+                    else:
+                        print(f'✓ Auto-detected apparatus ID: {apparatus_id}')
             
             break
         except serial.SerialException as e:

@@ -15,6 +15,7 @@ import platform
 import importlib.util
 import time
 import getpass
+import tempfile
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SAVE_RATE_MINUTES = 30
@@ -408,6 +409,173 @@ def get_service_status():
         return None, None
 
 
+def _git_run(args, capture_output=True):
+    """Run a git command in the project directory."""
+    return subprocess.run(
+        ['git', '-C', SCRIPT_DIR] + args,
+        capture_output=capture_output,
+        text=True
+    )
+
+
+def get_tracked_local_changes():
+    """Return tracked local git changes (staged/unstaged), ignoring untracked files."""
+    result = _git_run(['status', '--porcelain', '--untracked-files=no'])
+    if result.returncode != 0:
+        return None
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def print_local_changes(changes, limit=10):
+    """Print a compact list of local git changes."""
+    if not changes:
+        return
+
+    print("\n  Local tracked changes detected:")
+    for line in changes[:limit]:
+        print(f"    • {line}")
+    if len(changes) > limit:
+        print(f"    • ... and {len(changes) - limit} more")
+
+
+def launch_windows_update_worker(target_branch):
+    """Launch a detached updater process on Windows, then exit current launcher."""
+    launcher_path = os.path.abspath(__file__)
+    launcher_args = sys.argv[1:]
+    worker_path = os.path.join(tempfile.gettempdir(), 'rium_update_worker.py')
+    current_pid = os.getpid()
+
+    worker_code = f'''#!/usr/bin/env python3
+import os
+import sys
+import time
+import subprocess
+
+SCRIPT_DIR = {SCRIPT_DIR!r}
+LAUNCHER_PATH = {launcher_path!r}
+PYTHON_EXE = {sys.executable!r}
+TARGET_BRANCH = {target_branch!r}
+CURRENT_PID = {current_pid}
+LAUNCHER_ARGS = {launcher_args!r}
+WORKER_PATH = os.path.abspath(__file__)
+
+
+def is_process_running(pid):
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+    except Exception:
+        return False
+
+
+print('=' * 70)
+print('  UPDATE PROJECT (Windows helper)')
+print('=' * 70)
+print('Waiting for launcher to exit...')
+
+deadline = time.time() + 30
+while time.time() < deadline and is_process_running(CURRENT_PID):
+    time.sleep(0.5)
+
+git_check = subprocess.run(['git', '--version'], capture_output=True, text=True)
+if git_check.returncode != 0:
+    print('\n❌ git is not installed or not in PATH.')
+    input('\nPress Enter to close...')
+    sys.exit(1)
+
+repo_check = subprocess.run(
+    ['git', '-C', SCRIPT_DIR, 'rev-parse', '--is-inside-work-tree'],
+    capture_output=True,
+    text=True
+)
+if repo_check.returncode != 0:
+    print(f'\n❌ {{SCRIPT_DIR}} is not a git repository.')
+    input('\nPress Enter to close...')
+    sys.exit(1)
+
+branch = subprocess.run(
+    ['git', '-C', SCRIPT_DIR, 'rev-parse', '--abbrev-ref', 'HEAD'],
+    capture_output=True,
+    text=True
+).stdout.strip()
+last_commit = subprocess.run(
+    ['git', '-C', SCRIPT_DIR, 'log', '-1', '--oneline'],
+    capture_output=True,
+    text=True
+).stdout.strip()
+
+print(f'\n  Branch  : {{branch}}')
+print(f'  Current : {{last_commit}}')
+print('\n→ Running git pull...')
+print('-' * 70)
+
+if branch != TARGET_BRANCH:
+    checkout = subprocess.run(
+        ['git', '-C', SCRIPT_DIR, 'checkout', TARGET_BRANCH],
+        capture_output=True,
+        text=True
+    )
+    if checkout.returncode != 0:
+        print(f"⚠️  Could not switch to {{TARGET_BRANCH}}: {{checkout.stderr.strip()}}")
+        print('Attempting pull anyway...')
+
+pull = subprocess.run(
+    ['git', '-C', SCRIPT_DIR, 'pull', '--rebase', 'origin', TARGET_BRANCH],
+    text=True
+)
+print('-' * 70)
+
+if pull.returncode != 0:
+    print('\n❌ git pull failed.')
+    input('\nPress Enter to close...')
+    sys.exit(pull.returncode)
+
+new_commit = subprocess.run(
+    ['git', '-C', SCRIPT_DIR, 'log', '-1', '--oneline'],
+    capture_output=True,
+    text=True
+).stdout.strip()
+
+if new_commit == last_commit:
+    print('\n✅ Already up to date — no changes pulled.')
+else:
+    print(f'\n✅ Updated to: {{new_commit}}')
+    changed = subprocess.run(
+        ['git', '-C', SCRIPT_DIR, 'diff', '--name-only', last_commit, 'HEAD'],
+        capture_output=True,
+        text=True
+    ).stdout.strip()
+    if changed:
+        print('  Changed files:')
+        for file_name in changed.splitlines():
+            print(f'    • {{file_name}}')
+
+print('\n→ Relaunching launcher...')
+subprocess.Popen([PYTHON_EXE, LAUNCHER_PATH] + LAUNCHER_ARGS, cwd=SCRIPT_DIR)
+
+try:
+    os.remove(WORKER_PATH)
+except Exception:
+    pass
+
+sys.exit(0)
+'''
+
+    with open(worker_path, 'w', encoding='utf-8') as f:
+        f.write(worker_code)
+
+    creationflags = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0)
+    subprocess.Popen(
+        [sys.executable, worker_path],
+        cwd=SCRIPT_DIR,
+        creationflags=creationflags
+    )
+
+
 def update_project():
     """
     Pull latest changes from the git remote.
@@ -451,10 +619,34 @@ def update_project():
     print(f"\n  Branch  : {branch}")
     print(f"  Current : {last_commit}")
 
+    local_changes = get_tracked_local_changes()
+    if local_changes is None:
+        print("\n⚠️  Could not inspect local git changes.")
+        print("   Run 'git status' manually before updating.")
+        return
+    if local_changes:
+        print("\n⚠️  Update cancelled to avoid conflicts with local modifications.")
+        print_local_changes(local_changes)
+        print("\n   Commit or stash these changes, then retry option 11.")
+        print("   Suggested commands:")
+        print("     • git status")
+        print("     • git add . ; git commit -m \"save local changes\"")
+        print("     • git stash push -m \"before update\"")
+        return
+
     confirm = input("\nPull latest changes from remote? (yes/no) [yes]: ").strip().lower()
     if confirm not in ['', 'yes', 'y']:
         print("Update cancelled.")
         return
+
+    target_branch = 'main'
+
+    if os.name == 'nt':
+        print("\n→ Windows detected: launching a separate updater to avoid file locking...")
+        launch_windows_update_worker(target_branch)
+        print("  ✅ Updater started in a new window.")
+        print("  Closing current launcher so files can be updated safely.")
+        sys.exit(0)
 
     # 4. Stop service if active (avoid read_dosimeter.py being replaced mid-run)
     service_was_active = False
@@ -471,19 +663,19 @@ def update_project():
     print("-" * 70)
     
     # First, try to checkout main if not already on it
-    if branch != 'main':
-        print(f"  Switching from '{branch}' to 'main'...")
+    if branch != target_branch:
+        print(f"  Switching from '{branch}' to '{target_branch}'...")
         checkout = subprocess.run(
-            ['git', '-C', SCRIPT_DIR, 'checkout', 'main'],
+            ['git', '-C', SCRIPT_DIR, 'checkout', target_branch],
             capture_output=True, text=True
         )
         if checkout.returncode != 0:
-            print(f"  ⚠️  Could not switch to main branch: {checkout.stderr}")
+            print(f"  ⚠️  Could not switch to {target_branch} branch: {checkout.stderr}")
             print("  Attempting pull anyway...")
     
     # Pull with rebase to avoid merge commits
     pull = subprocess.run(
-        ['git', '-C', SCRIPT_DIR, 'pull', '--rebase', 'origin', 'main'],
+        ['git', '-C', SCRIPT_DIR, 'pull', '--rebase', 'origin', target_branch],
         text=True
     )
     print("-" * 70)
@@ -752,37 +944,20 @@ def run_configuration_wizard():
         # Import the detection function
         import sys
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from read_dosimeter import find_serial_ports
+        from read_dosimeter import find_candidate_ports, get_usb_device_mac
         
         # Find available serial ports
-        ports = find_serial_ports()
+        ports = find_candidate_ports()
         if ports:
             port = ports[0]  # Use first available port
             print(f"  Found Rium GM on port: {port}")
             print()
             
-            # Try to get MAC address from the device
-            # Read from /sys/class/tty/ttyUSB0/device/address or similar
             try:
-                import os.path
-                tty_name = os.path.basename(port)
-                
-                # Try common paths for MAC address
-                mac_paths = [
-                    f'/sys/class/tty/{tty_name}/device/address',
-                    f'/sys/class/tty/{tty_name}/../device/address',
-                ]
-                
-                device_mac = None
-                for mac_path in mac_paths:
-                    if os.path.exists(mac_path):
-                        with open(mac_path, 'r') as f:
-                            device_mac = f.read().strip()
-                            if device_mac and device_mac != '00:00:00:00:00:00':
-                                break
+                device_mac = get_usb_device_mac(port)
                 
                 if device_mac:
-                    detected_apparatus_id = f"RIUM_GM_{device_mac.replace(':', '').upper()}"
+                    detected_apparatus_id = device_mac
                     print(f"✓ Auto-detected device MAC: {device_mac}")
                     print(f"✓ Apparatus ID: {detected_apparatus_id}")
                 else:
