@@ -466,18 +466,42 @@ def update_project():
             service_was_active = True
             print("  ✅ Service stopped.")
 
-    # 5. git pull
-    print("\n→ Running git pull...")
+    # 5. git pull from main branch with rebase
+    print("\n→ Running git pull from main branch...")
     print("-" * 70)
+    
+    # First, try to checkout main if not already on it
+    if branch != 'main':
+        print(f"  Switching from '{branch}' to 'main'...")
+        checkout = subprocess.run(
+            ['git', '-C', SCRIPT_DIR, 'checkout', 'main'],
+            capture_output=True, text=True
+        )
+        if checkout.returncode != 0:
+            print(f"  ⚠️  Could not switch to main branch: {checkout.stderr}")
+            print("  Attempting pull anyway...")
+    
+    # Pull with rebase to avoid merge commits
     pull = subprocess.run(
-        ['git', '-C', SCRIPT_DIR, 'pull'],
+        ['git', '-C', SCRIPT_DIR, 'pull', '--rebase', 'origin', 'main'],
         text=True
     )
     print("-" * 70)
 
     if pull.returncode != 0:
         print("\n❌ git pull failed (see output above).")
-        print("   Possible causes: merge conflict, no remote configured, no internet.")
+        print("\n   Possible causes:")
+        print("     • No internet connection")
+        print("     • Remote not configured (check: git remote -v)")
+        print("     • Merge conflict (run: git status)")
+        print("     • Local changes not committed (run: git status)")
+        print("     • Authentication issue (SSH key or credentials)")
+        print("\n   Try these fixes:")
+        print("     1. Check internet connection")
+        print("     2. Run: git status")
+        print("     3. Commit local changes or stash them")
+        print("     4. Try: git fetch origin")
+        print("     5. Try: git reset --hard origin/main")
         # Restart service even if pull failed
         if service_was_active and is_linux():
             print("\n→ Restarting service (pull failed, restoring previous state)...")
@@ -600,6 +624,7 @@ def run_configuration_wizard():
             'api_key': config.get('DEFAULT', 'api_key', fallback=''),
             'username': config.get('DEFAULT', 'username', fallback=''),
             'password': config.get('DEFAULT', 'password', fallback=''),
+            'apparatus_id': config.get('DEFAULT', 'apparatus_id', fallback=''),
             'latitude': config.get('DEFAULT', 'latitude', fallback=''),
             'longitude': config.get('DEFAULT', 'longitude', fallback=''),
             'tags': config.get('DEFAULT', 'tags', fallback=''),
@@ -715,6 +740,78 @@ def run_configuration_wizard():
         longitude = get_float("Longitude (e.g., 2.3522) (press Enter to skip)", required=False)
     print()
     
+    # Apparatus ID (unique device identifier) - AUTO-DETECTED
+    print("2.5️⃣  Device Identification (Apparatus ID)")
+    print("-" * 70)
+    print("Detecting Rium GM device MAC address...")
+    print()
+    
+    # Try to detect apparatus ID from connected Rium GM MAC
+    detected_apparatus_id = None
+    try:
+        # Import the detection function
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from read_dosimeter import find_serial_ports
+        
+        # Find available serial ports
+        ports = find_serial_ports()
+        if ports:
+            port = ports[0]  # Use first available port
+            print(f"  Found Rium GM on port: {port}")
+            print()
+            
+            # Try to get MAC address from the device
+            # Read from /sys/class/tty/ttyUSB0/device/address or similar
+            try:
+                import os.path
+                tty_name = os.path.basename(port)
+                
+                # Try common paths for MAC address
+                mac_paths = [
+                    f'/sys/class/tty/{tty_name}/device/address',
+                    f'/sys/class/tty/{tty_name}/../device/address',
+                ]
+                
+                device_mac = None
+                for mac_path in mac_paths:
+                    if os.path.exists(mac_path):
+                        with open(mac_path, 'r') as f:
+                            device_mac = f.read().strip()
+                            if device_mac and device_mac != '00:00:00:00:00:00':
+                                break
+                
+                if device_mac:
+                    detected_apparatus_id = f"RIUM_GM_{device_mac.replace(':', '').upper()}"
+                    print(f"✓ Auto-detected device MAC: {device_mac}")
+                    print(f"✓ Apparatus ID: {detected_apparatus_id}")
+                else:
+                    print(f"⚠ Could not read MAC address from device")
+                    print(f"  Will use fallback ID")
+            except Exception as e:
+                print(f"⚠ Error reading MAC address: {e}")
+                print(f"  Will use fallback ID")
+        else:
+            print("⚠ No serial ports detected - is Rium GM connected?")
+    except ImportError:
+        print("⚠ Could not import detection functions")
+    except Exception as e:
+        print(f"⚠ Detection failed: {e}")
+    
+    # Use detected ID, or generate fallback
+    if detected_apparatus_id:
+        apparatus_id = detected_apparatus_id
+        print()
+    else:
+        # Fallback: generate from timestamp
+        apparatus_id = f"RIUM_GM_{int(time.time())}"
+        print(f"  Fallback ID generated: {apparatus_id}")
+        print()
+    
+    print("ℹ️  This ID uniquely identifies your Rium GM device")
+    print("    and will be sent with every measurement to OpenRadiation.")
+    print()
+    
     # Tags
     print("3️⃣  Station Tags (Optional)")
     print("-" * 70)
@@ -766,6 +863,7 @@ def run_configuration_wizard():
     print(f"API Key: {masked_api}")
     print(f"Username/User ID: {user_id if user_id else 'Not set'}")
     print(f"Password: {'Stored in encrypted file' if password else 'Not set'}")
+    print(f"Apparatus ID: {apparatus_id if apparatus_id else 'Not set'}")
     location_str = f"{latitude}, {longitude}" if latitude and longitude else "Not set"
     print(f"Location: {location_str}")
     print(f"Tags: {tags if tags else 'None'}")
@@ -780,6 +878,7 @@ def run_configuration_wizard():
         config['DEFAULT'] = {
             'api_key': api_key if api_key else '',
             'username': username if username else '',
+            'apparatus_id': apparatus_id if apparatus_id else '',
             'latitude': str(latitude) if latitude else current_latitude,
             'longitude': str(longitude) if longitude else current_longitude,
             'tags': tags if tags else '',

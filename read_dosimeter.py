@@ -40,6 +40,14 @@ from pathlib import Path
 from typing import Optional
 from cryptography.fernet import Fernet
 
+# Optional: try to import pyusb for USB device info
+try:
+    import usb.backend.libusb1
+    import usb.core
+    HAS_PYUSB = True
+except ImportError:
+    HAS_PYUSB = False
+
 
 DEFAULT_SAVE_RATE = 900  # [s] - Default peiod for aggregating and sending measurements (15 minutes)
 MAX_QUEUE_SIZE = 1400  # Maximum number of failed measurements to keep in queue
@@ -177,6 +185,142 @@ def check_existing_pid_file() -> Optional[int]:
     if pid:
         remove_pid_file()
     return None
+
+
+def get_usb_device_serial(port: str) -> Optional[str]:
+    """
+    Extract USB device serial number from a serial port.
+    Works on Linux and macOS by reading USB device info.
+    
+    Args:
+        port: Serial port path (e.g., /dev/ttyUSB0)
+    
+    Returns:
+        USB serial number if found, None otherwise
+    """
+    
+    # Try using pyusb if available
+    if HAS_PYUSB:
+        try:
+            # Common USB to Serial chip vendors
+            usb_devices = usb.core.find(find_all=True)
+            for device in usb_devices:
+                try:
+                    # Check if this is a serial adapter (FTDI, CP2102, etc.)
+                    if device.serial_number:
+                        return device.serial_number
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    # Fallback: Try Linux udevadm (most reliable on Raspberry Pi)
+    if sys.platform.startswith('linux'):
+        try:
+            # For /dev/ttyUSB0 format
+            result = subprocess.run(
+                ['udevadm', 'info', '-a', '-n', port],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            if result.returncode == 0:
+                # Look for serial number in udevadm output
+                for line in result.stdout.split('\n'):
+                    # Try ATTRS{serial} first (most reliable)
+                    if 'ATTRS{serial}' in line:
+                        match = re.search(r'ATTRS\{serial\}=="([^"]+)"', line)
+                        if match:
+                            serial = match.group(1)
+                            # Verify it's not empty or just spaces
+                            if serial.strip():
+                                return serial
+                    # Fallback to ID_SERIAL_SHORT (device-specific)
+                    elif 'ID_SERIAL_SHORT' in line:
+                        match = re.search(r'ID_SERIAL_SHORT=([^\s]+)', line)
+                        if match:
+                            serial = match.group(1)
+                            if serial.strip() and not serial.startswith('SYS'):
+                                return serial
+                    # Last resort: ID_SERIAL
+                    elif 'ID_SERIAL=' in line and not '=' in line.split('ID_SERIAL=')[0]:
+                        match = re.search(r'ID_SERIAL=([^\s]+)', line)
+                        if match:
+                            serial = match.group(1)
+                            # Extract just the serial part (after vendor)
+                            if '_' in serial:
+                                serial = serial.split('_', 1)[1]
+                            if serial.strip():
+                                return serial
+        except Exception as e:
+            pass
+    
+    # Fallback: Try macOS system_profiler
+    if sys.platform == 'darwin':
+        try:
+            result = subprocess.run(
+                ['system_profiler', 'SPUSBDataType'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                # Parse for serial numbers
+                for line in result.stdout.split('\n'):
+                    if 'Serial Number:' in line:
+                        serial = line.split('Serial Number:')[1].strip()
+                        return serial
+        except Exception:
+            pass
+    
+    # Fallback: Try to read from sysfs (Linux)
+    if sys.platform.startswith('linux'):
+        try:
+            # Example: /dev/ttyUSB0 -> /sys/class/tty/ttyUSB0
+            tty_name = os.path.basename(port)
+            sysfs_path = f'/sys/class/tty/{tty_name}/device/../'
+            
+            # Try different sysfs attributes
+            for attr in ['serial', 'uevent', 'modalias']:
+                try:
+                    attr_path = os.path.join(sysfs_path, f'../../{attr}')
+                    if os.path.exists(attr_path):
+                        with open(attr_path, 'r') as f:
+                            content = f.read().strip()
+                            if content and not content.startswith('SYS'):
+                                return content[:20]  # Return first 20 chars
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    return None
+
+
+def get_apparatus_id_from_port(port: str, fallback_id: Optional[str] = None) -> str:
+    """
+    Get apparatus ID from USB device serial or use fallback.
+    
+    Args:
+        port: Serial port path
+        fallback_id: Fallback ID if USB serial not found
+    
+    Returns:
+        Apparatus ID string
+    """
+    usb_serial = get_usb_device_serial(port)
+    
+    if usb_serial:
+        # Create a clean apparatus ID from USB serial
+        apparatus_id = f"RIUM_GM_{usb_serial}"
+        return apparatus_id
+    elif fallback_id:
+        return fallback_id
+    else:
+        # Generate from port name as last resort
+        port_name = os.path.basename(port)
+        return f"RIUM_GM_{port_name}_{int(time.time())}"
 
 # Check and install dependencies automatically
 def check_dependencies():
@@ -786,6 +930,7 @@ def main():
     parser.add_argument('--cps-to-usvh-func', default=None, help='Conversion formula of cps to µSv/h, e.g. "(0.00000003751 * (cps * 60 - 4)**2 + 0.00965 * (cps * 60 - 4)) * 0.85"')
     parser.add_argument('--production', action='store_true', help='Set reportContext to routine (real data) instead of test. Use with caution!')
     parser.add_argument('--tag', action='append', default=[], help='Add tags to measurements (can be used multiple times, e.g. --tag location=Paris --tag device=GM1)')
+    parser.add_argument('--apparatus-id', help='Unique identifier for the Rium GM device (e.g. MAC address like 00:1A:2B:3C:4D:5E)')
     parser.add_argument('--set-password', help='Set password for a user ID in encrypted storage (e.g. --set-password myuser)')
     parser.add_argument('--clear-password', help='Clear stored password for a user ID from encrypted storage (e.g. --clear-password myuser)')
     parser.add_argument('--save-rate', type=float, help='Save/send interval in minutes (minimum 15)')
@@ -848,6 +993,13 @@ def main():
     if config is None and args.send_data:
         print("Error: Cannot send data without valid configuration.")
         sys.exit(1)
+    
+    # Get apparatus_id from argument or config file
+    apparatus_id = args.apparatus_id
+    if not apparatus_id and config:
+        apparatus_id = config.get('apparatus_id', None)
+    
+    # Auto-detection will happen after port is opened (see below)
 
     # Determine SAVE_RATE (seconds) from CLI or config (config stored in minutes)
     SAVE_RATE = DEFAULT_SAVE_RATE
@@ -1117,6 +1269,14 @@ def main():
         try:
             ser = open_serial(port, args.baud)
             print(f'Connected successfully!')
+            
+            # Auto-detect apparatus_id from USB device if not already provided
+            if not apparatus_id:
+                detected_id = get_apparatus_id_from_port(port)
+                if detected_id:
+                    apparatus_id = detected_id
+                    print(f'✓ Auto-detected apparatus ID: {apparatus_id}')
+            
             break
         except serial.SerialException as e:
             error_text = str(e)
@@ -1302,6 +1462,10 @@ def main():
                                 "description": f"Rium GM fixed beacon measurement",
                                 "calibrationFunction": f"{args.cps_to_usvh_func}"
                             }
+                            
+                            # Add apparatus_id (unique device identifier) if provided
+                            if apparatus_id:
+                                data["apparatusId"] = apparatus_id
                             
                             # Add userId (prefer user_id over username)
                             if user_id:
