@@ -743,27 +743,53 @@ def run_configuration_wizard():
     # Apparatus ID (unique device identifier) - AUTO-DETECTED
     print("2.5️⃣  Device Identification (Apparatus ID)")
     print("-" * 70)
-    print("Detecting Rium GM USB device...")
+    print("Detecting Rium GM device MAC address...")
     print()
     
-    # Try to detect apparatus ID from connected Rium GM
+    # Try to detect apparatus ID from connected Rium GM MAC
     detected_apparatus_id = None
     try:
         # Import the detection function
         import sys
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from read_dosimeter import get_apparatus_id_from_port, find_serial_ports
+        from read_dosimeter import find_serial_ports
         
         # Find available serial ports
         ports = find_serial_ports()
         if ports:
             port = ports[0]  # Use first available port
-            detected_apparatus_id = get_apparatus_id_from_port(port)
-            if detected_apparatus_id:
-                print(f"✓ Auto-detected Apparatus ID: {detected_apparatus_id}")
-                print(f"  (Detected from USB device on port: {port})")
-            else:
-                print(f"⚠ Could not detect USB serial on port {port}")
+            print(f"  Found Rium GM on port: {port}")
+            print()
+            
+            # Try to get MAC address from the device
+            # Read from /sys/class/tty/ttyUSB0/device/address or similar
+            try:
+                import os.path
+                tty_name = os.path.basename(port)
+                
+                # Try common paths for MAC address
+                mac_paths = [
+                    f'/sys/class/tty/{tty_name}/device/address',
+                    f'/sys/class/tty/{tty_name}/../device/address',
+                ]
+                
+                device_mac = None
+                for mac_path in mac_paths:
+                    if os.path.exists(mac_path):
+                        with open(mac_path, 'r') as f:
+                            device_mac = f.read().strip()
+                            if device_mac and device_mac != '00:00:00:00:00:00':
+                                break
+                
+                if device_mac:
+                    detected_apparatus_id = f"RIUM_GM_{device_mac.replace(':', '').upper()}"
+                    print(f"✓ Auto-detected device MAC: {device_mac}")
+                    print(f"✓ Apparatus ID: {detected_apparatus_id}")
+                else:
+                    print(f"⚠ Could not read MAC address from device")
+                    print(f"  Will use fallback ID")
+            except Exception as e:
+                print(f"⚠ Error reading MAC address: {e}")
                 print(f"  Will use fallback ID")
         else:
             print("⚠ No serial ports detected - is Rium GM connected?")
